@@ -1816,7 +1816,7 @@ class AutonomousEngine(
             }
         }
 
-        if (created.isEmpty()) {
+        if (created.isEmpty() && !killSwitch && !runCancelled) {
             val secRes = runAiCompletion(
                 systemPrompt = "Write high-quality deliverable content as JSON: {\"title\": \"...\", \"subtitle\": \"...\", \"sections\": [{\"heading\": \"...\", \"body\": \"...\"}]} (at least 4 detailed sections).",
                 userPrompt = "Company: ${comp.name}\nGoal: $goal",
@@ -1833,7 +1833,7 @@ class AutonomousEngine(
             }
         }
 
-        if (created.isEmpty()) {
+        if (created.isEmpty() && !killSwitch && !runCancelled) {
             created.add(buildFallbackPdfArtifact(comp, bot, title, goal, spec))
         }
         return created

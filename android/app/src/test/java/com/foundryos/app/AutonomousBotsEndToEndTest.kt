@@ -580,7 +580,7 @@ class AutonomousBotsEndToEndTest {
         // 1) Propose & Deploy company -> auto-creates dedicated Notion page
         aiServer.enqueue(
             openAiWrap(
-                """{"company_name":"AcademyFlow","mission_statement":"Formations IA en continu","strategy_summary":"Équipe prête.","recommended_connectors":["notion","browser"],"bots":[
+                """{"name":"AcademyFlow","mission_statement":"Formations IA en continu","strategy_summary":"Équipe prête.","recommended_connectors":["notion","browser"],"bots":[
                     {"name":"CEO","role":"CEO","tagline":"Leads","system_prompt":"Lead AcademyFlow","allowed_tools":["notion_search"],"is_qa":false},
                     {"name":"Producer","role":"Course Builder","tagline":"Builds PDFs","system_prompt":"Create modules","allowed_tools":["create_pdf"],"is_qa":false},
                     {"name":"Memory","role":"Memory Sync","tagline":"Logs history","system_prompt":"Track journal","allowed_tools":["company_memory"],"is_qa":false},

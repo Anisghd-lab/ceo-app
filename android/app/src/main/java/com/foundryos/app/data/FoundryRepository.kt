@@ -83,6 +83,10 @@ class FoundryRepository(private val context: Context) {
         sandbox.destroySandbox(companyId)
     }
 
+    fun archiveCompany(companyId: String, archived: Boolean = true) {
+        db.updateCompanyStatus(companyId, if (archived) "ARCHIVED" else "ACTIVE")
+    }
+
     fun inspectLocalUri(uri: Uri): AttachedLocalFile? {
         val resolver = context.contentResolver
         var name = "file_${System.currentTimeMillis() % 10000}"
@@ -221,6 +225,10 @@ class FoundryRepository(private val context: Context) {
     fun getProviderStatuses(): List<ProviderStatus> = llm.getProviderStatuses()
 
     fun getProviderKey(provider: String): String = llm.getProviderKey(provider)
+
+    fun getProviderBaseUrl(provider: String): String = llm.getProviderBaseUrl(provider)
+
+    fun saveProviderBaseUrl(provider: String, baseUrl: String) = llm.saveProviderBaseUrl(provider, baseUrl)
 
     fun getCachedModels(provider: String): List<RemoteModelInfo> = llm.getCachedModels(provider)
 

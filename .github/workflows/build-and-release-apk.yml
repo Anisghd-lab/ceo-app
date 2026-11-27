@@ -7,9 +7,9 @@ on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: 'Release tag (e.g. v0.6.1)'
+        description: 'Release tag (e.g. v0.7.0)'
         required: false
-        default: 'v0.6.1'
+        default: 'v0.7.0'
 
 permissions:
   contents: write
@@ -50,6 +50,10 @@ jobs:
         with:
           gradle-version: '8.9'
 
+      - name: Run Android JVM Unit & Integration Tests
+        working-directory: android
+        run: gradle testDebugUnitTest --no-daemon
+
       - name: Compile Debug APK (Persistent Signature)
         working-directory: android
         env:
@@ -81,7 +85,7 @@ jobs:
             if [[ "${{ github.ref }}" == refs/tags/* ]]; then
               TAG="${{ github.ref_name }}"
             else
-              TAG="v0.6.1"
+              TAG="v0.7.0"
             fi
           fi
 

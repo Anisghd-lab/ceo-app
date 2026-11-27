@@ -44,6 +44,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Add
+import androidx.compose.material.icons.rounded.Archive
 import androidx.compose.material.icons.rounded.ArrowUpward
 import androidx.compose.material.icons.rounded.Assessment
 import androidx.compose.material.icons.rounded.AttachFile
@@ -51,20 +52,28 @@ import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.ChevronLeft
 import androidx.compose.material.icons.rounded.ChevronRight
 import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.Delete
 import androidx.compose.material.icons.rounded.FolderOpen
+import androidx.compose.material.icons.rounded.KeyboardArrowDown
+import androidx.compose.material.icons.rounded.KeyboardArrowUp
 import androidx.compose.material.icons.rounded.Language
 import androidx.compose.material.icons.rounded.PlaylistAdd
 import androidx.compose.material.icons.rounded.Psychology
 import androidx.compose.material.icons.rounded.Public
 import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material.icons.rounded.Stop
+import androidx.compose.material.icons.rounded.Unarchive
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
+import androidx.compose.material3.SwipeToDismissBox
+import androidx.compose.material3.SwipeToDismissBoxValue
 import androidx.compose.material3.Text
 import androidx.compose.material3.VerticalDivider
+import androidx.compose.material3.rememberSwipeToDismissBoxState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -202,7 +211,9 @@ fun FoundryMainScreen(repo: FoundryRepository) {
 
         val list = repo.fetchCompanies()
         companies = list
-        val chosen = preferredCompanyId?.takeIf { id -> list.any { it.id == id } } ?: list.firstOrNull()?.id
+        val chosen = preferredCompanyId?.takeIf { id -> list.any { it.id == id } }
+            ?: list.firstOrNull { !it.status.equals("ARCHIVED", true) }?.id
+            ?: list.firstOrNull()?.id
         activeCompanyId = chosen
         if (chosen != null) {
             val (b, m, c) = repo.fetchCompanyDetail(chosen)
@@ -238,6 +249,8 @@ fun FoundryMainScreen(repo: FoundryRepository) {
         }
         refreshAll(activeCompanyId)
     }
+
+    var showArchivedCompanies by remember { mutableStateOf(false) }
 
     LaunchedEffect(Unit) {
         refreshAll()
@@ -416,11 +429,14 @@ fun FoundryMainScreen(repo: FoundryRepository) {
                                 }
                                 .padding(2.dp),
                         ) {
+                            val botWorking = (botTelemetry[bot.id]?.status ?: bot.status).equals("working", true) ||
+                                (bot.isCeo && (isBusy || liveReasoning.active))
                             BotMascot(
                                 shape = bot.avatarShape,
                                 colorHex = bot.avatarColor,
                                 size = 34.dp,
                                 badgeCount = pendingBadge,
+                                isWorking = botWorking,
                             )
                         }
                     }
@@ -469,10 +485,15 @@ fun FoundryMainScreen(repo: FoundryRepository) {
                                 .padding(horizontal = 11.dp, vertical = 6.dp),
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
+                            val headerWorking = if (headerBot != null) {
+                                (botTelemetry[headerBot.id]?.status ?: headerBot.status).equals("working", true) ||
+                                    (headerBot.isCeo && (isBusy || liveReasoning.active))
+                            } else (isBusy || liveReasoning.active)
                             BotMascot(
                                 shape = headerBot?.avatarShape ?: "circle",
                                 colorHex = headerBot?.avatarColor ?: "#111111",
                                 size = 20.dp,
+                                isWorking = headerWorking,
                             )
                             Spacer(Modifier.width(7.dp))
                             Text(
@@ -668,8 +689,11 @@ fun FoundryMainScreen(repo: FoundryRepository) {
                     }
 
                     items(messages, key = { it.id }) { msg ->
+                        val workingIds = botTelemetry.filterValues { it.status.equals("working", true) }.keys +
+                            bots.filter { it.isCeo && (isBusy || liveReasoning.active) }.map { it.id }
                         ChatMessageRow(
                             msg = msg,
+                            workingBotIds = workingIds,
                             onBotClick = { bot ->
                                 val chosen = bots.firstOrNull { it.id == bot.id } ?: bot
                                 selectedBot = chosen
@@ -717,6 +741,7 @@ fun FoundryMainScreen(repo: FoundryRepository) {
                                             shape = headerBot?.avatarShape ?: "circle",
                                             colorHex = headerBot?.avatarColor ?: "#111111",
                                             size = 20.dp,
+                                            isWorking = true,
                                         )
                                         Spacer(Modifier.width(8.dp))
                                         Text(
@@ -1109,7 +1134,9 @@ fun FoundryMainScreen(repo: FoundryRepository) {
                             contentAlignment = Alignment.Center,
                         ) {
                             Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                                BotMascot(shape = "circle", colorHex = "#111111", size = 46.dp)
+                                val ceoDrawerBot = bots.firstOrNull { it.isCeo }
+                                val ceoDrawerWorking = (ceoDrawerBot?.let { botTelemetry[it.id]?.status ?: it.status }?.equals("working", true) == true) || isBusy || liveReasoning.active
+                                BotMascot(shape = "circle", colorHex = "#111111", size = 46.dp, isWorking = ceoDrawerWorking)
                                 Spacer(Modifier.height(6.dp))
                                 Text("CEO", fontWeight = FontWeight.SemiBold, fontSize = 13.sp, color = FoundryColors.InkPrimary)
                             }
@@ -1150,7 +1177,8 @@ fun FoundryMainScreen(repo: FoundryRepository) {
                                         .padding(horizontal = 8.dp, vertical = 7.dp),
                                     verticalAlignment = Alignment.CenterVertically,
                                 ) {
-                                    BotMascot(shape = bot.avatarShape, colorHex = bot.avatarColor, size = 30.dp)
+                                    val drawerBotWorking = (botTelemetry[bot.id]?.status ?: bot.status).equals("working", true)
+                                    BotMascot(shape = bot.avatarShape, colorHex = bot.avatarColor, size = 30.dp, isWorking = drawerBotWorking)
                                     Spacer(Modifier.width(9.dp))
                                     Column(modifier = Modifier.weight(1f)) {
                                         Text(
@@ -1173,41 +1201,107 @@ fun FoundryMainScreen(repo: FoundryRepository) {
                                 }
                             }
 
-                            if (companies.size > 1) {
+                            val activeCompanies = companies.filter { !it.status.equals("ARCHIVED", ignoreCase = true) }
+                            val archivedCompanies = companies.filter { it.status.equals("ARCHIVED", ignoreCase = true) }
+
+                            if (companies.isNotEmpty()) {
                                 item {
                                     Spacer(Modifier.height(8.dp))
                                     HorizontalDivider(color = FoundryColors.Border)
                                     Spacer(Modifier.height(8.dp))
-                                    Text("Sandboxes (${companies.size})", fontSize = 11.sp, fontWeight = FontWeight.SemiBold, color = FoundryColors.InkMuted)
+                                    Text(
+                                        text = "Sandboxes (${activeCompanies.size}) · ← suppr · → arch.",
+                                        fontSize = 10.5.sp,
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = FoundryColors.InkMuted,
+                                    )
                                 }
-                                items(companies) { comp ->
-                                    val active = comp.id == activeCompanyId
+                                items(activeCompanies, key = { "c_act_${it.id}" }) { comp ->
+                                    SwipeableCompanyRow(
+                                        comp = comp,
+                                        active = comp.id == activeCompanyId,
+                                        isArchived = false,
+                                        onClick = {
+                                            selectedBot = null
+                                            refreshAll(comp.id)
+                                            sidebarExpanded = false
+                                        },
+                                        onDelete = {
+                                            repo.deleteCompany(comp.id)
+                                            if (activeCompanyId == comp.id) {
+                                                selectedBot = null
+                                                refreshAll(null)
+                                            } else {
+                                                refreshAll(activeCompanyId)
+                                            }
+                                            Toast.makeText(context, "Entreprise '${comp.name}' supprimée", Toast.LENGTH_SHORT).show()
+                                        },
+                                        onToggleArchive = {
+                                            repo.archiveCompany(comp.id, archived = true)
+                                            if (activeCompanyId == comp.id) {
+                                                selectedBot = null
+                                                refreshAll(null)
+                                            } else {
+                                                refreshAll(activeCompanyId)
+                                            }
+                                            Toast.makeText(context, "'${comp.name}' archivée", Toast.LENGTH_SHORT).show()
+                                        },
+                                    )
+                                }
+                            }
+
+                            if (archivedCompanies.isNotEmpty()) {
+                                item {
+                                    Spacer(Modifier.height(6.dp))
                                     Row(
                                         modifier = Modifier
                                             .fillMaxWidth()
-                                            .clip(RoundedCornerShape(10.dp))
-                                            .background(if (active) Color.White else Color.Transparent)
-                                            .border(if (active) 1.dp else 0.dp, if (active) FoundryColors.Border else Color.Transparent, RoundedCornerShape(10.dp))
-                                            .clickable {
+                                            .clip(RoundedCornerShape(8.dp))
+                                            .clickable { showArchivedCompanies = !showArchivedCompanies }
+                                            .padding(horizontal = 4.dp, vertical = 4.dp),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically,
+                                    ) {
+                                        Text(
+                                            text = "Archivées (${archivedCompanies.size})",
+                                            fontSize = 11.sp,
+                                            fontWeight = FontWeight.SemiBold,
+                                            color = FoundryColors.InkMuted,
+                                        )
+                                        Icon(
+                                            imageVector = if (showArchivedCompanies) Icons.Rounded.KeyboardArrowUp else Icons.Rounded.KeyboardArrowDown,
+                                            contentDescription = "Toggle archived",
+                                            tint = FoundryColors.InkMuted,
+                                            modifier = Modifier.size(16.dp),
+                                        )
+                                    }
+                                }
+                                if (showArchivedCompanies) {
+                                    items(archivedCompanies, key = { "c_arc_${it.id}" }) { comp ->
+                                        SwipeableCompanyRow(
+                                            comp = comp,
+                                            active = comp.id == activeCompanyId,
+                                            isArchived = true,
+                                            onClick = {
                                                 selectedBot = null
                                                 refreshAll(comp.id)
                                                 sidebarExpanded = false
-                                            }
-                                            .padding(horizontal = 8.dp, vertical = 7.dp),
-                                        verticalAlignment = Alignment.CenterVertically,
-                                    ) {
-                                        Box(
-                                            Modifier
-                                                .size(8.dp)
-                                                .background(if (active) FoundryColors.GreenSolid else FoundryColors.InkMuted, CircleShape)
-                                        )
-                                        Spacer(Modifier.width(8.dp))
-                                        Text(
-                                            comp.name,
-                                            fontSize = 12.sp,
-                                            fontWeight = if (active) FontWeight.SemiBold else FontWeight.Normal,
-                                            maxLines = 1,
-                                            overflow = TextOverflow.Ellipsis,
+                                            },
+                                            onDelete = {
+                                                repo.deleteCompany(comp.id)
+                                                if (activeCompanyId == comp.id) {
+                                                    selectedBot = null
+                                                    refreshAll(null)
+                                                } else {
+                                                    refreshAll(activeCompanyId)
+                                                }
+                                                Toast.makeText(context, "Entreprise '${comp.name}' supprimée", Toast.LENGTH_SHORT).show()
+                                            },
+                                            onToggleArchive = {
+                                                repo.archiveCompany(comp.id, archived = false)
+                                                refreshAll(comp.id)
+                                                Toast.makeText(context, "'${comp.name}' restaurée", Toast.LENGTH_SHORT).show()
+                                            },
                                         )
                                     }
                                 }
@@ -1283,6 +1377,7 @@ fun FoundryMainScreen(repo: FoundryRepository) {
             statusMessage = settingsMessage,
             statusIsSuccess = settingsSuccess,
             getSavedKey = { prov -> repo.getProviderKey(prov) },
+            getSavedBaseUrl = { prov -> repo.getProviderBaseUrl(prov) },
             getCachedModels = { prov -> repo.getCachedModels(prov) },
             getPluginToken = { id -> repo.getPluginToken(id) },
             getPluginClientId = { id -> repo.getPluginClientId(id) },
@@ -1440,6 +1535,10 @@ fun FoundryMainScreen(repo: FoundryRepository) {
                 settingsSuccess = true
                 refreshAll(activeCompanyId)
             },
+            onSaveProviderBaseUrl = { prov, url ->
+                repo.saveProviderBaseUrl(prov, url)
+                refreshAll(activeCompanyId)
+            },
             onFetchModels = { prov, key ->
                 scope.launch {
                     isFetchingModels = true
@@ -1526,6 +1625,7 @@ fun FoundryMainScreen(repo: FoundryRepository) {
 @Composable
 private fun ChatMessageRow(
     msg: ChatMessageItem,
+    workingBotIds: Set<String> = emptySet(),
     onBotClick: (BotItem) -> Unit,
     onApprove: (String) -> Unit,
     onReject: (String) -> Unit,
@@ -1566,6 +1666,7 @@ private fun ChatMessageRow(
                 subtitle = msg.orgSubtitle,
                 bots = msg.orgBots,
                 connectors = msg.orgConnectors,
+                workingBotIds = workingBotIds,
                 onBotClick = onBotClick,
             )
         }
@@ -1605,6 +1706,127 @@ private fun ChatMessageRow(
         }
         else -> {
             BotBubble(text = msg.content)
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun SwipeableCompanyRow(
+    comp: CompanyItem,
+    active: Boolean,
+    isArchived: Boolean,
+    onClick: () -> Unit,
+    onDelete: () -> Unit,
+    onToggleArchive: () -> Unit,
+) {
+    val dismissState = rememberSwipeToDismissBoxState(
+        confirmValueChange = { value ->
+            when (value) {
+                SwipeToDismissBoxValue.EndToStart -> {
+                    // Glisser à gauche -> Supprimer
+                    onDelete()
+                    true
+                }
+                SwipeToDismissBoxValue.StartToEnd -> {
+                    // Glisser à droite -> Archiver / Restaurer
+                    onToggleArchive()
+                    false
+                }
+                else -> false
+            }
+        }
+    )
+
+    SwipeToDismissBox(
+        state = dismissState,
+        enableDismissFromStartToEnd = true,
+        enableDismissFromEndToStart = true,
+        backgroundContent = {
+            val dir = dismissState.dismissDirection
+            val isDelete = dir == SwipeToDismissBoxValue.EndToStart
+            val bg = when (dir) {
+                SwipeToDismissBoxValue.StartToEnd -> Color(0xFFDBEAFE)
+                SwipeToDismissBoxValue.EndToStart -> FoundryColors.RedBg
+                else -> Color.Transparent
+            }
+            Row(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(bg)
+                    .padding(horizontal = 10.dp),
+                horizontalArrangement = if (isDelete) Arrangement.End else Arrangement.Start,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                if (dir == SwipeToDismissBoxValue.StartToEnd) {
+                    Icon(
+                        imageVector = if (isArchived) Icons.Rounded.Unarchive else Icons.Rounded.Archive,
+                        contentDescription = null,
+                        tint = FoundryColors.BlueInk,
+                        modifier = Modifier.size(15.dp),
+                    )
+                    Spacer(Modifier.width(5.dp))
+                    Text(
+                        text = if (isArchived) "Restaurer" else "Archiver",
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = FoundryColors.BlueInk,
+                    )
+                } else if (dir == SwipeToDismissBoxValue.EndToStart) {
+                    Text(
+                        text = "Supprimer",
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = FoundryColors.RedInk,
+                    )
+                    Spacer(Modifier.width(5.dp))
+                    Icon(
+                        imageVector = Icons.Rounded.Delete,
+                        contentDescription = null,
+                        tint = FoundryColors.RedInk,
+                        modifier = Modifier.size(15.dp),
+                    )
+                }
+            }
+        },
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(10.dp))
+                .background(if (active) Color.White else FoundryColors.SidebarBg)
+                .border(
+                    width = if (active) 1.dp else 0.dp,
+                    color = if (active) FoundryColors.Border else Color.Transparent,
+                    shape = RoundedCornerShape(10.dp),
+                )
+                .clickable { onClick() }
+                .padding(horizontal = 8.dp, vertical = 7.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Box(
+                Modifier
+                    .size(8.dp)
+                    .background(
+                        when {
+                            active -> FoundryColors.GreenSolid
+                            isArchived -> FoundryColors.AmberInk
+                            else -> FoundryColors.InkMuted
+                        },
+                        CircleShape,
+                    )
+            )
+            Spacer(Modifier.width(8.dp))
+            Text(
+                text = comp.name,
+                fontSize = 12.sp,
+                fontWeight = if (active) FontWeight.SemiBold else FontWeight.Normal,
+                color = if (isArchived) FoundryColors.InkSecondary else FoundryColors.InkPrimary,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
         }
     }
 }

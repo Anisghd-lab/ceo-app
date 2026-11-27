@@ -183,6 +183,13 @@ class LocalDatabase(context: Context) : SQLiteOpenHelper(context, "ceo_ondevice.
         writableDatabase.delete("companies", "id = ?", arrayOf(companyId))
     }
 
+    fun updateCompanyStatus(companyId: String, status: String) {
+        writableDatabase.execSQL(
+            "UPDATE companies SET status = ? WHERE id = ?",
+            arrayOf(status.uppercase().trim(), companyId),
+        )
+    }
+
     fun addTokensUsed(companyId: String, tokens: Int) {
         if (tokens <= 0) return
         writableDatabase.execSQL(
@@ -229,6 +236,13 @@ class LocalDatabase(context: Context) : SQLiteOpenHelper(context, "ceo_ondevice.
 
     fun updateBotModel(botId: String, model: String) {
         writableDatabase.execSQL("UPDATE bots SET model = ? WHERE id = ?", arrayOf(model, botId))
+    }
+
+    fun updateBotRoleAndPrompt(botId: String, role: String, systemPrompt: String) {
+        writableDatabase.execSQL(
+            "UPDATE bots SET role = ?, system_prompt = ? WHERE id = ?",
+            arrayOf(role.take(80), systemPrompt, botId),
+        )
     }
 
     fun clearBotUnread(botId: String) {

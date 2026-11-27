@@ -265,6 +265,7 @@ class AutonomousEngine(
             - Output strictly ONE JSON object.
             - MUST include at least ONE independent Quality/Verification bot (`"is_qa": true`) that audits deliverables before human approval.
             - MUST include a Memory bot (`company_memory`) to keep all bots aligned.
+            - As CEO, YOU MUST author a distinct, concrete `role` AND a detailed multi-sentence `system_prompt` for EACH specialist bot strictly tailored to (a) this exact company objective (`$description`), (b) that bot's individual specialty/KPIs, (c) its assigned `allowed_tools` / plugins, and (d) autonomous execution + `[Bot → CEO]` reporting.
             - Assign both sandbox atomic tools (${JSONArray(atomicTools)}) and relevant connected/available plugin tool names in `allowed_tools` per specialist bot so every bot understands its exact job and reaches the company objective.
             - Suggest useful external REST APIs/connectors in `recommended_connectors`.
 
@@ -335,18 +336,31 @@ class AutonomousEngine(
             if (bName.isBlank() || bName.equals("ceo", ignoreCase = true)) continue
             val (shape, color) = avatarPalette[i % avatarPalette.size]
             val tArr = b.optJSONArray("allowed_tools") ?: JSONArray()
-            val tools = (0 until tArr.length()).map { tArr.optString(it) }.filter { it in atomicTools }
-                .ifEmpty { listOf("sandbox_files", "create_pdf", "company_memory", "artifact_publish") }
+            val pluginToolNames = PluginRegistry.ALL.flatMap { p -> p.tools.map { it.name } }.toSet()
+            val tools = (0 until tArr.length())
+                .map { tArr.optString(it) }
+                .filter { it in atomicTools || it in pluginToolNames }
+                .ifEmpty { listOf("sandbox_files", "create_pdf", "company_memory", "artifact_publish", "browser_search") }
             val isQa = b.optBoolean("is_qa", false)
             if (isQa) hasQa = true
+            val botRole = b.optString("role", bName).take(60)
+            val botPrompt = enrichBotSystemPrompt(
+                botName = bName.take(32),
+                role = botRole,
+                companyName = name,
+                companyObjective = mission.ifBlank { description },
+                rawPrompt = b.optString("system_prompt"),
+                allowedTools = tools,
+                isQa = isQa,
+            )
             bots.add(
                 BotItem(
                     id = "b_${i + 1}",
                     companyId = "",
                     name = bName.take(32),
-                    role = b.optString("role", bName).take(60),
+                    role = botRole,
                     tagline = b.optString("tagline", "Executes assigned tasks").take(60),
-                    systemPrompt = b.optString("system_prompt", "Execute $bName duties rigorously inside the company sandbox."),
+                    systemPrompt = botPrompt,
                     avatarShape = shape,
                     avatarColor = color,
                     allowedTools = tools,
@@ -365,7 +379,15 @@ class AutonomousEngine(
                     name = "Quality Auditor",
                     role = "Independent QA & Verification",
                     tagline = "Audits every deliverable",
-                    systemPrompt = "Independently verify quality, accuracy, and completeness of every deliverable before approval.",
+                    systemPrompt = enrichBotSystemPrompt(
+                        botName = "Quality Auditor",
+                        role = "Independent QA & Verification",
+                        companyName = name,
+                        companyObjective = mission.ifBlank { description },
+                        rawPrompt = "Independently verify quality, accuracy, and completeness of every deliverable before human approval.",
+                        allowedTools = listOf("sandbox_files", "company_memory"),
+                        isQa = true,
+                    ),
                     avatarShape = shape,
                     avatarColor = color,
                     allowedTools = listOf("sandbox_files", "company_memory"),
@@ -383,6 +405,36 @@ class AutonomousEngine(
             rawProposalJson = raw.toString(),
             errorNote = errorNote,
         )
+    }
+
+    private fun enrichBotSystemPrompt(
+        botName: String,
+        role: String,
+        companyName: String,
+        companyObjective: String,
+        rawPrompt: String,
+        allowedTools: List<String>,
+        isQa: Boolean,
+    ): String {
+        val cleaned = rawPrompt.trim()
+        val hasObjective = cleaned.contains(companyObjective.take(24), ignoreCase = true) ||
+            cleaned.contains(companyName, ignoreCase = true)
+        val hasRole = cleaned.contains(role, ignoreCase = true)
+        val toolsStr = allowedTools.joinToString(", ").ifBlank { "sandbox_files" }
+        if (cleaned.length >= 110 && hasObjective && hasRole) {
+            return cleaned
+        }
+        val coreMandate = cleaned.ifBlank {
+            if (isQa) "Independently audit every deliverable against strict quality and factual accuracy before release approval."
+            else "Autonomously execute $role deliverables cleanly inside the company sandbox."
+        }
+        return buildString {
+            append("You are $botName ($role) at '$companyName'.\n")
+            append("Company objective: $companyObjective\n")
+            append("Your individual mandate assigned by CEO: $coreMandate\n")
+            append("Assigned tools & plugins: $toolsStr\n")
+            append("Always act autonomously using real tools/plugins, never hallucinate outputs, and report results clearly to CEO.")
+        }
     }
 
     private fun synthesizeAdaptiveFallback(description: String, errorNote: String = ""): CompanyProposalData {
@@ -468,6 +520,12 @@ class AutonomousEngine(
         }
 
         db.rememberNote("mem_${UUID.randomUUID().toString().take(8)}", cid, "Memory", "founding", "Company '${proposal.name}' founded: ${proposal.missionStatement}")
+        val mandatesSummary = persistedBots.filterNot { it.isCeo }.joinToString("\n") { b ->
+            "• ${b.name} (${b.role}): ${b.systemPrompt.take(140)}"
+        }
+        if (mandatesSummary.isNotBlank()) {
+            db.rememberNote("mem_${UUID.randomUUID().toString().take(8)}", cid, "CEO", "ceo_mandates", mandatesSummary)
+        }
 
         db.insertMessage(ChatMessageItem("msg_${UUID.randomUUID().toString().take(10)}", cid, "human", content = description))
         val ceoOpening = buildString {
@@ -477,6 +535,9 @@ class AutonomousEngine(
             append(proposal.strategySummary.ifBlank {
                 "Entreprise '${proposal.name}' prête (${persistedBots.size} bots). Dis-moi quel objectif tu veux analyser ou construire."
             })
+            if (mandatesSummary.isNotBlank()) {
+                append("\n\n👔 Rôles et prompts attribués par le CEO :\n").append(mandatesSummary)
+            }
         }
         db.insertMessage(
             ChatMessageItem(
@@ -649,12 +710,14 @@ class AutonomousEngine(
             Instructions:
             - Respond in the exact same language as the Founder (e.g. French if the founder writes in French).
             - Think step-by-step and give a genuinely reasoned, concrete, helpful CEO answer aligned with the company objective. Never output canned filler.
+            - As CEO, you can assign or update any specialist bot's individual role and tailored system prompt aligned with the company objective by calling:
+              {"action":"tool","tool":"assign_bot_prompt","args":{"bot_name":"Builder","role":"...","system_prompt":"..."}}
             - You CAN call any connected Plugin or Sandbox tool directly before answering by outputting ONE JSON object:
               {"action":"tool","tool":"<tool_name>","args":{...}}
-              Supported sandbox tools: list_files, read_file, write_file, create_pdf, create_zip, product_design_prototype.
+              Supported sandbox tools: list_files, read_file, write_file, create_pdf, create_zip, product_design_prototype, assign_bot_prompt.
               Or ANY connected plugin tool above (browser_search, browser_read_url, notion_search, github_list_repos, slack_list_channels, gmail_search, gdrive_search, figma_get_file, canva_list_designs, scite_search, tinyfish_extract, etc.).
             - ONLY if the Founder wants a full multi-bot pipeline producing deliverables with QA + Approval, output:
-              {"action":"run_mission","title":"Short mission title","goal":"Detailed mission goal","ceo_reply":"Your reasoned CEO plan explaining how your specialists will use plugins & LLMs"}
+              {"action":"run_mission","title":"Short mission title","goal":"Detailed mission goal","ceo_reply":"Your reasoned CEO plan explaining how your specialists will use plugins & LLMs","bot_mandates":{"Strategist":"Tailored mission directive aligned with role & objective","Builder":"Tailored mission directive"}}
             - When ready to reply directly (or after tool observations), respond with clean prose/markdown (or {"action":"final","reply":"..."}).
         """.trimIndent()
 
@@ -715,7 +778,18 @@ class AutonomousEngine(
                     }
                     val mTitle = obj?.optString("title").orEmpty().ifBlank { userPrompt.take(58) }
                     val mGoal = obj?.optString("goal").orEmpty().ifBlank { userPrompt }
-                    runFullMission(comp, bots, title = mTitle, goal = mGoal, onStatusUpdate = onStatusUpdate)
+                    val mandatesObj = obj?.optJSONObject("bot_mandates")
+                    val mandatesMap = buildMap<String, String> {
+                        if (mandatesObj != null) {
+                            val keys = mandatesObj.keys()
+                            while (keys.hasNext()) {
+                                val k = keys.next()
+                                val v = mandatesObj.optString(k).trim()
+                                if (v.isNotBlank()) put(k, v)
+                            }
+                        }
+                    }
+                    runFullMission(comp, bots, title = mTitle, goal = mGoal, botMandates = mandatesMap, onStatusUpdate = onStatusUpdate)
                     finishReasoning("Mission completed")
                     return
                 }
@@ -854,17 +928,46 @@ class AutonomousEngine(
         bots: List<BotItem>,
         title: String,
         goal: String,
+        botMandates: Map<String, String> = emptyMap(),
         onStatusUpdate: suspend (String) -> Unit,
     ) {
-        val ceoBot = bots.firstOrNull { it.isCeo } ?: bots.first()
-        val qaBot = bots.firstOrNull { it.isQa } ?: bots.last()
-        val strategistBot = bots.firstOrNull { !it.isCeo && !it.isQa && (it.allowedTools.contains("web_fetch") || it.name.contains("Strateg", true)) }
-        val producerBot = bots.firstOrNull { !it.isCeo && !it.isQa && (it.allowedTools.contains("create_pdf") || it.id != strategistBot?.id) }
-            ?: bots.firstOrNull { !it.isCeo && !it.isQa } ?: ceoBot
+        // CEO tailors each specialist's role & prompt according to the company objective + mission + individual role
+        val alignedBots = bots.map { b ->
+            if (b.isCeo) b
+            else {
+                val ceoDirective = botMandates.entries.firstOrNull { it.key.equals(b.name, ignoreCase = true) }?.value.orEmpty()
+                val updatedPrompt = if (ceoDirective.isNotBlank()) {
+                    "You are ${b.name} (${b.role}) at '${comp.name}'.\nCompany objective: ${comp.description}\nCEO Mission Mandate: $ceoDirective\nCore role instructions: ${b.systemPrompt}"
+                } else {
+                    enrichBotSystemPrompt(
+                        botName = b.name,
+                        role = b.role,
+                        companyName = comp.name,
+                        companyObjective = comp.description,
+                        rawPrompt = b.systemPrompt,
+                        allowedTools = b.allowedTools,
+                        isQa = b.isQa,
+                    )
+                }
+                if (updatedPrompt != b.systemPrompt) {
+                    db.updateBotRoleAndPrompt(b.id, b.role, updatedPrompt)
+                    b.copy(systemPrompt = updatedPrompt)
+                } else b
+            }
+        }
+
+        val ceoBot = alignedBots.firstOrNull { it.isCeo } ?: alignedBots.first()
+        val qaBot = alignedBots.firstOrNull { it.isQa } ?: alignedBots.last()
+        val strategistBot = alignedBots.firstOrNull { !it.isCeo && !it.isQa && (it.allowedTools.contains("web_fetch") || it.allowedTools.contains("browser_search") || it.name.contains("Strateg", true)) }
+        val producerBot = alignedBots.firstOrNull { !it.isCeo && !it.isQa && (it.allowedTools.contains("create_pdf") || it.id != strategistBot?.id) }
+            ?: alignedBots.firstOrNull { !it.isCeo && !it.isQa } ?: ceoBot
 
         val missionId = "msn_${UUID.randomUUID().toString().take(8)}"
         db.insertMission(missionId, comp.id, title, goal)
         db.updateBotStatus(ceoBot.id, "working", "Delegating mission...")
+        alignedBots.filterNot { it.isCeo }.forEach { sp ->
+            recordBotActivity(sp, "idle", task = "Mandate assigned: ${sp.role}", reasoning = sp.systemPrompt.take(260))
+        }
 
         // Step 1: Strategist / Scoping (Agentic with connected Plugins + LLM)
         var scopedSpec = goal
@@ -906,9 +1009,63 @@ class AutonomousEngine(
         recordBotActivity(producerBot, "working", task = "Building deliverables: $title")
         db.updateBotStatus(producerBot.id, "working", "Building deliverable...")
 
-        var createdArtifacts = runProducerAgentLoop(comp, producerBot, missionId, title, goal, scopedSpec, onStatusUpdate)
+        var createdArtifacts = runProducerAgentLoop(comp, producerBot, missionId, title, goal, scopedSpec, onStatusUpdate).toMutableList()
         recordBotActivity(producerBot, "idle", task = "Built ${createdArtifacts.size} artifact(s)")
         db.updateBotStatus(producerBot.id, "idle", "Deliverable ready", incrementUnread = true)
+        db.insertMessage(
+            ChatMessageItem(
+                "msg_${UUID.randomUUID().toString().take(10)}",
+                comp.id,
+                "bot",
+                botId = producerBot.id,
+                botName = producerBot.name,
+                content = "🛠️ [${producerBot.name} → CEO] Production terminée : ${createdArtifacts.joinToString(", ") { it.filename }}",
+            )
+        )
+        if (runCancelled || killSwitch) return
+
+        // Step 2b: Engage any additional domain specialists (Designer, Publisher, Growth, Ops...) autonomously
+        val memoryBot = alignedBots.firstOrNull { !it.isCeo && !it.isQa && (it.name.equals("Memory", true) || it.allowedTools == listOf("company_memory")) }
+        val otherSpecialists = alignedBots.filter { b ->
+            !b.isCeo && !b.isQa &&
+                b.id != strategistBot?.id &&
+                b.id != producerBot.id &&
+                b.id != memoryBot?.id
+        }
+        for (specBot in otherSpecialists) {
+            if (runCancelled || killSwitch) return
+            if (!hasActiveEngine()) break
+            onStatusUpdate("${specBot.name} (${specBot.role}) collaborating...")
+            recordBotActivity(specBot, "working", task = "Executing ${specBot.role} for $title")
+            db.updateBotStatus(specBot.id, "working", "Using tools & plugins...")
+            val builtList = createdArtifacts.joinToString(", ") { "${it.filename} (${it.relPath})" }.ifBlank { "none yet" }
+            val specReply = runDirectBotChat(
+                comp = comp,
+                bot = specBot,
+                userText = "You are collaborating on mission '$title' (Goal: $goal).\n" +
+                    "Current deliverables in sandbox output/: $builtList.\n" +
+                    "Using ONLY your real role (${specBot.role}), your sandbox/plugin tools, and facts from the spec, perform your concrete specialist step (for example build a supporting companion file/HTML/MD, verify distribution readiness, or prepare plugin actions) and report concisely to CEO.\n\nSpec summary:\n${scopedSpec.take(1500)}",
+                onStatusUpdate = onStatusUpdate,
+            )
+            if (!runCancelled && !specReply.startsWith("⚠️")) {
+                recordBotActivity(specBot, "idle", task = "Reported to CEO", reasoning = specReply.take(280))
+                db.updateBotStatus(specBot.id, "idle", "Done · Reported", incrementUnread = true)
+                db.rememberNote("mem_${UUID.randomUUID().toString().take(8)}", comp.id, specBot.name, "report_to_ceo", specReply.take(600))
+                db.insertMessage(
+                    ChatMessageItem(
+                        "msg_${UUID.randomUUID().toString().take(10)}",
+                        comp.id,
+                        "bot",
+                        botId = specBot.id,
+                        botName = specBot.name,
+                        content = "🤖 [${specBot.name} → CEO] ${specReply.lineSequence().firstOrNull { it.isNotBlank() }?.take(220) ?: "Tâche exécutée."}",
+                    )
+                )
+            } else {
+                recordBotActivity(specBot, "idle", task = "Standing by")
+                db.updateBotStatus(specBot.id, "idle", "Ready")
+            }
+        }
         if (runCancelled || killSwitch) return
 
         // Step 3: Independent Quality Auditor checks every artifact against company objective
@@ -934,7 +1091,7 @@ class AutonomousEngine(
                 onStatusUpdate,
             )
             if (revised.isNotEmpty()) {
-                createdArtifacts = revised
+                createdArtifacts = revised.toMutableList()
                 primaryArt = revised.firstOrNull()
                 qaTuple = runIndependentQa(comp, qaBot, primaryArt, goal)
             }
@@ -955,6 +1112,21 @@ class AutonomousEngine(
                 content = "🛡️ [${qaBot.name} → CEO] Audit QA : $qaScore/100 — $qaReport",
             )
         )
+        memoryBot?.let { mBot ->
+            val memSummary = "Mission '$title' built by ${producerBot.name}; QA by ${qaBot.name}: $qaScore/100 ($qaReport)"
+            recordBotActivity(mBot, "idle", task = "Memory synced ($qaScore/100)", tool = "company_memory", plugin = "Company Memory", reasoning = memSummary)
+            db.updateBotStatus(mBot.id, "idle", "Synced", incrementUnread = true)
+            db.insertMessage(
+                ChatMessageItem(
+                    "msg_${UUID.randomUUID().toString().take(10)}",
+                    comp.id,
+                    "bot",
+                    botId = mBot.id,
+                    botName = mBot.name,
+                    content = "🧠 [${mBot.name} → CEO] Mémoire d'entreprise synchronisée : $memSummary",
+                )
+            )
+        }
 
         for (art in createdArtifacts) {
             val status = if (qaPassed) "PASSED" else "FAILED"
@@ -1046,109 +1218,96 @@ class AutonomousEngine(
         }
 
         val compRoot = sandbox.companyRoot(comp.id)
-        val existingOutNames = sandbox.listOutputFiles(comp.id).map { it.name }.toSet()
+        val seenOutNames = sandbox.listOutputFiles(comp.id).map { it.name }.toMutableSet()
 
-        if (canUseAgyEngine()) {
-            // Antigravity CLI executes reasoning + file creation inside compRoot
-            val agyRes = runAiCompletion(
-                systemPrompt = """
-                    You are ${bot.name} (${bot.role}) at company '${comp.name}'.
-                    Company objective: ${comp.description}
-                    Your instructions: ${bot.systemPrompt}
-                    ${pluginExecutor?.activeToolsSummaryForPrompt().orEmpty()}
+        val sysPrompt = """
+            You are ${bot.name} (${bot.role}) at company '${comp.name}'.
+            Company objective: ${comp.description}
+            Your instructions: ${bot.systemPrompt}
+            ${pluginExecutor?.activeToolsSummaryForPrompt().orEmpty()}
 
-                    Work inside this sandbox directory (${compRoot.absolutePath}).
-                    Create high-quality deliverable files inside output/ (e.g. output/${slugify(title)}.md or .html or .csv or scripts) AND/OR return a single JSON object:
-                    {"action": "tool", "tool": "create_pdf", "args": {"filename": "${slugify(title)}.pdf", "title": "...", "subtitle": "...", "sections": [{"heading": "...", "body": "..."}]}}
-                    If you want to call a connected plugin tool, respond with {"action":"tool","tool":"<plugin_tool>","args":{...}}.
-                    If you already wrote deliverable files directly into output/, respond with:
-                    {"title": "...", "subtitle": "...", "sections": [{"heading": "...", "body": "..."}]} so we also generate a crisp PDF companion.
-                """.trimIndent(),
-                userPrompt = "Mission: $title\nGoal: $goal\nSpec:\n$spec",
+            You work inside an isolated Android sandbox (${compRoot.absolutePath}).
+            You MUST use real connected plugin tools or sandbox tools to research, build, and produce thorough, publish-ready deliverables.
+            Reply strictly with ONE JSON object per step:
+            - Call a tool:
+              {"action": "tool", "tool": "create_pdf", "args": {"filename": "${slugify(title)}.pdf", "title": "...", "subtitle": "...", "sections": [{"heading": "...", "body": "..."}]}}
+              Sandbox tools:
+              * "list_files": {}
+              * "read_file": {"rel_path": "workspace/uploads/file.txt"}
+              * "write_file": {"rel_path": "output/file.md", "content": "..."}
+              * "create_zip": {"zip_filename": "bundle.zip", "rel_paths": ["output/file1.pdf", "output/file2.md"]}
+              * "product_design_prototype": {"filename": "prototype.html", "title": "...", "html": "..."}
+              Or ANY connected plugin tool above!
+            - Finish once deliverables exist in output/:
+              {"action": "final", "summary": "...", "primary_rel_path": "output/${slugify(title)}.pdf"}
+        """.trimIndent()
+
+        val promptHistory = mutableListOf("Mission: $title\nGoal: $goal\nSpec:\n$spec")
+        var lastAiText = ""
+
+        for (step in 1..6) {
+            if (killSwitch || runCancelled) break
+            onStatusUpdate("${bot.name} executing step $step/6...")
+            val res = runAiCompletion(
+                systemPrompt = sysPrompt,
+                userPrompt = promptHistory.joinToString("\n\n"),
                 sandboxDir = compRoot,
                 modelSpec = bot.model,
+                jsonMode = !canUseAgyEngine(),
                 maxTokens = 3200,
                 onStatus = onStatusUpdate,
             )
-            if (agyRes.ok) {
-                db.addTokensUsed(comp.id, agyRes.tokensUsed)
-                val newFiles = sandbox.listOutputFiles(comp.id).filter { it.name !in existingOutNames }
-                for (f in newFiles) {
-                    created.add(registerArtifact(comp.id, bot.name, f.nameWithoutExtension, f, "Generated in sandbox via Antigravity CLI"))
-                }
-                val parsed = llm.extractJsonObject(agyRes.content)
-                if (parsed != null) {
-                    val toolName = parsed.optString("tool")
-                    if (toolName == "create_pdf") {
-                        val args = parsed.optJSONObject("args") ?: JSONObject()
-                        executeAnyTool(comp, bot, "create_pdf", args, onStatusUpdate).second?.let { created.add(it) }
-                    } else if (toolName.isNotBlank()) {
-                        val args = parsed.optJSONObject("args") ?: JSONObject()
-                        executeAnyTool(comp, bot, toolName, args, onStatusUpdate).second?.let { created.add(it) }
-                    } else if (parsed.has("sections")) {
-                        executeAnyTool(comp, bot, "create_pdf", parsed.put("filename", "${slugify(title)}.pdf"), onStatusUpdate).second?.let { created.add(it) }
+            if (!res.ok) break
+            db.addTokensUsed(comp.id, res.tokensUsed)
+            lastAiText = res.content
+
+            // Pick up any native output/ files written directly by Antigravity CLI
+            val newlyCreatedOnDisk = sandbox.listOutputFiles(comp.id).filter { it.name !in seenOutNames }
+            for (f in newlyCreatedOnDisk) {
+                seenOutNames.add(f.name)
+                created.add(registerArtifact(comp.id, bot.name, f.nameWithoutExtension, f, "Generated in sandbox"))
+            }
+
+            val parsed = llm.extractJsonObject(res.content) ?: break
+            val action = parsed.optString("action").lowercase()
+            val toolName = parsed.optString("tool")
+            when {
+                action == "tool" || toolName.isNotBlank() -> {
+                    val chosenTool = toolName.ifBlank { "create_pdf" }
+                    val args = parsed.optJSONObject("args") ?: JSONObject()
+                    val (obs, art) = executeAnyTool(comp, bot, chosenTool, args, onStatusUpdate)
+                    if (art != null) {
+                        seenOutNames.add(art.filename)
+                        created.add(art)
                     }
-                } else if (created.isEmpty() && agyRes.content.length > 80) {
-                    val file = sandbox.createPdf(
-                        companyId = comp.id,
-                        filename = "${slugify(title)}.pdf",
-                        title = title,
-                        subtitle = "${comp.name} · Generated via Antigravity CLI (${bot.name})",
-                        sections = listOf(
-                            "Deliverable" to agyRes.content.take(12000),
-                        ),
-                    )
-                    created.add(registerArtifact(comp.id, bot.name, title, file, "PDF generated via Antigravity CLI"))
+                    promptHistory.add("Step $step called $chosenTool")
+                    promptHistory.add("Observation:\n$obs")
                 }
+                parsed.has("sections") && created.isEmpty() -> {
+                    val (_, art) = executeAnyTool(comp, bot, "create_pdf", parsed.put("filename", "${slugify(title)}.pdf"), onStatusUpdate)
+                    if (art != null) {
+                        seenOutNames.add(art.filename)
+                        created.add(art)
+                    }
+                    break
+                }
+                else -> break
             }
         }
 
-        if (created.isEmpty() && llm.hasAnyKey()) {
-            val sysPrompt = """
-                You are ${bot.name} (${bot.role}) at company '${comp.name}'.
-                Company objective: ${comp.description}
-                Your instructions: ${bot.systemPrompt}
-                ${pluginExecutor?.activeToolsSummaryForPrompt().orEmpty()}
-
-                You work inside an isolated Android sandbox. You MUST reply strictly with ONE JSON object:
-                Option 1 (call a sandbox or plugin tool):
-                {"action": "tool", "tool": "create_pdf", "args": {"filename": "slug.pdf", "title": "...", "subtitle": "...", "sections": [{"heading": "...", "body": "..."}]}}
-                Sandbox tools:
-                - "list_files": {}
-                - "read_file": {"rel_path": "workspace/uploads/file.txt"}
-                - "write_file": {"rel_path": "output/file.md", "content": "..."}
-                - "create_zip": {"zip_filename": "bundle.zip", "rel_paths": ["output/file1.pdf", "output/file2.md"]}
-                - "product_design_prototype": {"filename": "prototype.html", "title": "...", "html": "..."}
-                Or ANY connected plugin tool above!
-                Option 2 (finish after files are created):
-                {"action": "final", "summary": "...", "primary_rel_path": "output/slug.pdf"}
-
-                Make sure all content is genuinely thorough, rich, actionable, and publish-ready — never shallow placeholders.
-            """.trimIndent()
-
-            val history = mutableListOf(
-                "system" to sysPrompt,
-                "user" to "Mission: $title\nGoal: $goal\nSpec:\n$spec",
-            )
-
-            for (step in 1..6) {
-                if (killSwitch) break
-                val res = llm.complete(history, modelSpec = bot.model, jsonMode = true, maxTokens = 3200)
-                if (!res.ok) break
-                db.addTokensUsed(comp.id, res.tokensUsed)
-                val parsed = llm.extractJsonObject(res.content) ?: break
-                val action = parsed.optString("action", "final").lowercase()
-                if (action == "tool") {
-                    val tool = parsed.optString("tool")
-                    val args = parsed.optJSONObject("args") ?: JSONObject()
-                    val toolRes = executeAnyTool(comp, bot, tool, args, onStatusUpdate)
-                    val art = toolRes.second
-                    if (art != null) created.add(art)
-                    history.add("assistant" to parsed.toString())
-                    history.add("user" to "Tool '$tool' result: ${toolRes.first}")
-                } else {
-                    break
-                }
+        if (created.isEmpty() && lastAiText.length > 80 && !killSwitch && !runCancelled) {
+            val maybeObj = llm.extractJsonObject(lastAiText)
+            if (maybeObj?.has("sections") == true) {
+                executeSandboxTool(comp, bot, "create_pdf", maybeObj.put("filename", "${slugify(title)}.pdf")).second?.let { created.add(it) }
+            } else {
+                val file = sandbox.createPdf(
+                    companyId = comp.id,
+                    filename = "${slugify(title)}.pdf",
+                    title = title,
+                    subtitle = "${comp.name} · Generated by ${bot.name}",
+                    sections = listOf("Deliverable" to lastAiText.take(12000)),
+                )
+                created.add(registerArtifact(comp.id, bot.name, title, file, "PDF deliverable"))
             }
         }
 
@@ -1268,7 +1427,7 @@ class AutonomousEngine(
         val explicit = args.optString("url")
         if (explicit.startsWith("http")) return explicit
         return when {
-            tool == "browser_search" -> "https://duckduckgo.com/?q=${android.net.Uri.encode(args.optString("query"))}"
+            tool == "browser_search" -> "https://api.duckduckgo.com/?q=${java.net.URLEncoder.encode(args.optString("query"), "UTF-8")}"
             tool.startsWith("github_") -> {
                 val o = args.optString("owner")
                 val r = args.optString("repo")
@@ -1362,6 +1521,27 @@ class AutonomousEngine(
                 val file = sandbox.createZipBundle(comp.id, zName, paths)
                 val art = registerArtifact(comp.id, bot.name, zName, file, "Packaged ZIP (${paths.size} files)")
                 JSONObject().put("ok", true).put("rel_path", art.relPath).put("bytes", art.sizeBytes).toString() to art
+            }
+            "assign_bot_prompt" -> {
+                val targetName = args.optString("bot_name").trim()
+                val newRole = args.optString("role").trim()
+                val newPrompt = args.optString("system_prompt").trim()
+                val targetBot = db.listBots(comp.id).firstOrNull { it.name.equals(targetName, ignoreCase = true) }
+                    ?: return JSONObject().put("ok", false).put("error", "Bot '$targetName' not found").toString() to null
+                val finalRole = newRole.ifBlank { targetBot.role }
+                val finalPrompt = enrichBotSystemPrompt(
+                    botName = targetBot.name,
+                    role = finalRole,
+                    companyName = comp.name,
+                    companyObjective = comp.description,
+                    rawPrompt = newPrompt.ifBlank { targetBot.systemPrompt },
+                    allowedTools = targetBot.allowedTools,
+                    isQa = targetBot.isQa,
+                )
+                db.updateBotRoleAndPrompt(targetBot.id, finalRole, finalPrompt)
+                db.rememberNote("mem_${UUID.randomUUID().toString().take(8)}", comp.id, "CEO", "ceo_mandate", "${targetBot.name} -> $finalRole")
+                recordBotActivity(targetBot, "idle", task = "CEO updated role: $finalRole", reasoning = finalPrompt.take(280))
+                JSONObject().put("ok", true).put("bot", targetBot.name).put("role", finalRole).put("system_prompt", finalPrompt).toString() to null
             }
             "web_fetch" -> {
                 val url = args.optString("url")

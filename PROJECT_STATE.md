@@ -24,11 +24,23 @@
   - Composer avec **Stop immédiat (■)** et **File d'attente FIFO (`+ Queue`)** quand une tâche est déjà en cours.
   - Clic sur un bot → bannière télémétrie en direct + inspecteur détaillé (site visité cliquable, outil actif, raisonnement et historique chronologique).
 - [x] **UI Corrigée, Sections Collapsables & Navigateur In-App** (`MainApp.kt`, `Sheets.kt`, `InAppBrowserDialog.kt`).
-- [x] **Backend Python (`backend/`)** : 5/5 tests `pytest` verts sur CI.
+- [x] **Backend Python (`backend/`)** : 5/5 tests `pytest` verts.
+- [x] **FreeLLMAPI (`freellmapi`) + Pool Modèles Gratuits (`v0.7.0`)** :
+  - Fournisseur natif `freellmapi` avec URL de passerelle configurable (défaut `http://127.0.0.1:3001`), jeton Bearer optionnel en local, filtre automatique sur `available == true`, badge `FREE`, épingle `auto` / `fusion` et activation automatique du routeur gratuit.
+- [x] **UX Mobile Entreprises & Avatars Animés (`v0.7.0`)** :
+  - **Glisser-déposer sur les entreprises (`SwipeableCompanyRow`)** : glisser à gauche pour supprimer l'entreprise + sa sandbox, glisser à droite pour archiver / restaurer dans la section repliable `Archivées`.
+  - **Mascottes animées au travail réel (`BotMascot`)** : animation fluide (pulsation scale, micro-balancement, aura radar active et mouvement des yeux) déclenchée uniquement lorsque le bot est réellement en statut `working`.
+- [x] **Audit Agents & Suite de Tests Automatisés Android (`v0.7.0`)** :
+  - Correction `execBrowserSearch` (migration vers APIs JSON structurées Wikipédia OpenSearch + DuckDuckGo Instant Answer + HackerNews Algolia au lieu du scraping HTML bloqué).
+  - Correction `AutonomousEngine.normalizeProposal` pour conserver les noms d'outils des plugins sur les bots spécialisés et enrichir automatiquement le `role` et le `system_prompt` individuel de chaque bot selon l'objectif de l'entreprise.
+  - Ajout de la gouvernance **CEO Rôles & Prompts (`assign_bot_prompt` + `bot_mandates` + affichage dans `BotInspectorDialog`)** et exécution autonome de tous les spécialistes dans `runFullMission` (`Strategist`, `Producer`, `Publisher`/`Designer`, `Memory`, `Quality Auditor`) avec boucle ReAct à 6 étapes sur `agy` et LLM, et rapports `[Bot → CEO]`.
+  - Ajout de 3 suites de tests Robolectric + MockWebServer (`AgyAndAccountManagerTest`, `PluginSystemTest`, `AutonomousBotsEndToEndTest`) exécutées automatiquement dans CI (`gradle testDebugUnitTest`).
 
 ## 3. Lacunes, Dettes Techniques & Points de Vigilance
 - Certains services (Gmail, Google Drive, Slack, Canva, GitHub) nécessitent un `client_id` OAuth ou un token/PAT (saisissable via l'icône clé 🔑 de chaque plugin) si l'accès via session navigateur WebView seule ne suffit pas pour les appels REST directs.
 - L'installation binaire `agy` cible les smartphones Android ARM64 (`arm64-v8a`).
+- L'environnement ARM64 local ne peut pas lancer `aapt2` x86_64 pour `testDebugUnitTest` localement : la compilation APK et l'exécution de `testDebugUnitTest` s'effectuent sur **GitHub Actions (`ubuntu-latest`)**.
+- Tests d'instrumentation UI Compose sur appareil Android physique / émulateur non encore inclus dans le pipeline CI.
 
 ## 4. Prochaines Étapes
 1. Ajouter la sélection individuelle de modèle (`agy` / LLM) par bot depuis l'organigramme `Company Org`.

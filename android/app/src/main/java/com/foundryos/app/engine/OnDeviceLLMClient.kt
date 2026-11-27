@@ -45,9 +45,11 @@ class OnDeviceLLMClient(context: Context) {
         .build()
 
     companion object {
-        val BUILTIN_PROVIDERS = listOf("openrouter", "gemini", "xai", "openai", "anthropic", "deepseek", "groq")
+        const val DEFAULT_FREELLMAPI_URL = "http://127.0.0.1:3001"
+        val BUILTIN_PROVIDERS = listOf("freellmapi", "openrouter", "gemini", "xai", "openai", "anthropic", "deepseek", "groq")
 
         val ENDPOINTS = mapOf(
+            "freellmapi" to "$DEFAULT_FREELLMAPI_URL/v1/chat/completions",
             "openrouter" to "https://openrouter.ai/api/v1/chat/completions",
             "gemini" to "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
             "xai" to "https://api.x.ai/v1/chat/completions",
@@ -58,6 +60,7 @@ class OnDeviceLLMClient(context: Context) {
         )
 
         val MODELS_ENDPOINTS = mapOf(
+            "freellmapi" to "$DEFAULT_FREELLMAPI_URL/v1/models",
             "openrouter" to "https://openrouter.ai/api/v1/models",
             "gemini" to "https://generativelanguage.googleapis.com/v1beta/openai/models",
             "xai" to "https://api.x.ai/v1/models",
@@ -124,8 +127,37 @@ class OnDeviceLLMClient(context: Context) {
         return findCustom(p)?.protocol ?: "openai"
     }
 
+    fun getProviderBaseUrl(provider: String): String {
+        val p = provider.lowercase().trim()
+        if (p == "freellmapi") {
+            return prefs.getString("base_url_freellmapi", DEFAULT_FREELLMAPI_URL)?.trim()?.ifBlank { DEFAULT_FREELLMAPI_URL }
+                ?: DEFAULT_FREELLMAPI_URL
+        }
+        return findCustom(p)?.baseUrl ?: ENDPOINTS[p].orEmpty()
+    }
+
+    fun saveProviderBaseUrl(provider: String, baseUrl: String) {
+        val p = provider.lowercase().trim()
+        val clean = baseUrl.trim().trimEnd('/')
+        if (p == "freellmapi" && clean.startsWith("http")) {
+            prefs.edit().putString("base_url_freellmapi", clean).apply()
+        }
+    }
+
+    private fun resolveFreeLlmEndpoint(suffix: String): String {
+        val raw = getProviderBaseUrl("freellmapi").trimEnd('/')
+        val root = when {
+            raw.endsWith("/v1/chat/completions") -> raw.removeSuffix("/v1/chat/completions")
+            raw.endsWith("/v1/models") -> raw.removeSuffix("/v1/models")
+            raw.endsWith("/v1") -> raw.removeSuffix("/v1")
+            else -> raw
+        }
+        return "$root/v1/$suffix"
+    }
+
     private fun resolveChatUrl(providerId: String): String {
         val p = providerId.lowercase().trim()
+        if (p == "freellmapi") return resolveFreeLlmEndpoint("chat/completions")
         ENDPOINTS[p]?.let { return it }
         val custom = findCustom(p) ?: return ""
         val base = custom.baseUrl.trimEnd('/')
@@ -138,6 +170,7 @@ class OnDeviceLLMClient(context: Context) {
 
     private fun resolveModelsUrl(providerId: String): String {
         val p = providerId.lowercase().trim()
+        if (p == "freellmapi") return resolveFreeLlmEndpoint("models")
         MODELS_ENDPOINTS[p]?.let { return it }
         val custom = findCustom(p) ?: return ""
         val base = custom.baseUrl.trimEnd('/')
@@ -191,13 +224,20 @@ class OnDeviceLLMClient(context: Context) {
         prefs.edit().putString("models_cache_${provider.lowercase()}", arr.toString()).apply()
     }
 
+    private fun canSkipApiKey(providerId: String): Boolean {
+        val p = providerId.lowercase().trim()
+        if (p == "freellmapi") return isLocalUrl(getProviderBaseUrl("freellmapi"))
+        val custom = findCustom(p)
+        return custom != null && isLocalUrl(custom.baseUrl)
+    }
+
     fun getProviderStatuses(): List<ProviderStatus> {
         val builtIn = BUILTIN_PROVIDERS.map { p ->
             ProviderStatus(
                 name = p,
-                configured = getProviderKey(p).isNotBlank() && getProviderModel(p).isNotBlank(),
+                configured = getProviderModel(p).isNotBlank() && (getProviderKey(p).isNotBlank() || canSkipApiKey(p)),
                 model = getProviderModel(p),
-                baseUrl = ENDPOINTS[p] ?: "",
+                baseUrl = if (p == "freellmapi") getProviderBaseUrl("freellmapi") else (ENDPOINTS[p] ?: ""),
                 isCustom = false,
                 protocol = if (p == "anthropic") "anthropic" else "openai",
             )
@@ -238,9 +278,8 @@ class OnDeviceLLMClient(context: Context) {
      */
     suspend fun fetchAvailableModels(provider: String, apiKeyInput: String): ModelFetchResult = withContext(Dispatchers.IO) {
         val p = provider.lowercase().trim()
-        val custom = findCustom(p)
         val key = apiKeyInput.trim().ifBlank { getProviderKey(p) }
-        if (key.isBlank() && (custom == null || !isLocalUrl(custom.baseUrl))) {
+        if (key.isBlank() && !canSkipApiKey(p)) {
             return@withContext ModelFetchResult(false, emptyList(), "Please paste your $p API key first.")
         }
 
@@ -301,40 +340,64 @@ class OnDeviceLLMClient(context: Context) {
                 }
 
                 val parsed = mutableListOf<RemoteModelInfo>()
+                if (trimmed.startsWith("{")) {
+                    val autoObj = JSONObject(trimmed).optJSONObject("auto")
+                    if (autoObj != null) {
+                        val aId = autoObj.optString("id").ifBlank { "auto" }
+                        parsed.add(
+                            RemoteModelInfo(
+                                id = aId,
+                                name = autoObj.optString("description").ifBlank { "Auto (Free Router)" },
+                                isFree = true,
+                            )
+                        )
+                    }
+                }
                 for (i in 0 until dataArr.length()) {
                     val item = dataArr.opt(i)
                     if (item is String && item.isNotBlank()) {
-                        parsed.add(RemoteModelInfo(id = item, name = item))
+                        parsed.add(RemoteModelInfo(id = item, name = item, isFree = (p == "freellmapi") || item.endsWith(":free")))
                         continue
                     }
                     val m = item as? JSONObject ?: continue
+                    if (m.has("available") && !m.optBoolean("available", true)) continue
                     val id = m.optString("id").ifBlank { m.optString("name") }
                     if (id.isBlank()) continue
                     val displayName = m.optString("display_name").ifBlank { m.optString("name").ifBlank { id } }
                     val pricing = m.optJSONObject("pricing")
-                    val isFree = (pricing != null &&
-                        pricing.optString("prompt") == "0" &&
-                        pricing.optString("completion") == "0") ||
+                    val isFree = (p == "freellmapi") ||
+                        (pricing != null &&
+                            pricing.optString("prompt") == "0" &&
+                            pricing.optString("completion") == "0") ||
                         id.endsWith(":free")
                     parsed.add(RemoteModelInfo(id = id, name = displayName, isFree = isFree))
                 }
 
                 if (parsed.isEmpty()) {
-                    return@withContext ModelFetchResult(false, emptyList(), "API responded OK but returned 0 models.")
+                    return@withContext ModelFetchResult(false, emptyList(), "API responded OK but returned 0 available models.")
                 }
 
-                val sorted = parsed.distinctBy { it.id }.sortedWith(compareBy<RemoteModelInfo> { !it.isFree }.thenBy { it.id })
+                val sorted = parsed.distinctBy { it.id }.sortedWith(
+                    compareBy<RemoteModelInfo> { if (it.id == "auto") 0 else if (it.id == "fusion") 1 else 2 }
+                        .thenBy { !it.isFree }
+                        .thenBy { it.id }
+                )
                 saveCachedModels(p, sorted)
 
                 val currentModel = getProviderModel(p)
                 if (currentModel.isNotBlank() && sorted.none { it.id == currentModel }) {
                     saveProviderModel(p, "")
+                } else if (p == "freellmapi" && currentModel.isBlank()) {
+                    val defaultFree = sorted.firstOrNull { it.id == "auto" } ?: sorted.firstOrNull { it.isFree }
+                    if (defaultFree != null) saveProviderModel(p, defaultFree.id)
                 }
 
+                val freeCount = sorted.count { it.isFree }
                 ModelFetchResult(
                     ok = true,
                     models = sorted,
-                    message = "✓ Key verified · ${sorted.size} live models loaded from $p",
+                    message = if (p == "freellmapi") "✓ FreeLLMAPI verified · ${sorted.size} available free models loaded"
+                    else "✓ Key verified · ${sorted.size} live models loaded from $p" + if (freeCount > 0) " ($freeCount free)" else "",
                 )
             }
         } catch (e: Exception) {
@@ -349,8 +412,7 @@ class OnDeviceLLMClient(context: Context) {
         val p = provider.lowercase().trim()
         val cleanModel = modelId.trim()
         val key = getProviderKey(p)
-        val custom = findCustom(p)
-        if (key.isBlank() && (custom == null || !isLocalUrl(custom.baseUrl))) {
+        if (key.isBlank() && !canSkipApiKey(p)) {
             return false to "Verify your API key first."
         }
         if (cleanModel.isBlank()) return false to "Select or enter a model ID first."
@@ -397,16 +459,14 @@ class OnDeviceLLMClient(context: Context) {
             val prov = parts[0].trim().lowercase()
             val mod = parts[1].trim().ifBlank { getProviderModel(prov) }
             val key = getProviderKey(prov)
-            val custom = findCustom(prov)
-            if (mod.isNotBlank() && (key.isNotBlank() || (custom != null && isLocalUrl(custom.baseUrl)))) {
+            if (mod.isNotBlank() && (key.isNotBlank() || canSkipApiKey(prov))) {
                 out.add(Triple(prov, mod, key))
             }
         }
         for (prov in allProviderIds()) {
             val key = getProviderKey(prov)
             val mod = getProviderModel(prov)
-            val custom = findCustom(prov)
-            val hasCreds = key.isNotBlank() || (custom != null && isLocalUrl(custom.baseUrl))
+            val hasCreds = key.isNotBlank() || canSkipApiKey(prov)
             if (hasCreds && mod.isNotBlank() && out.none { it.first == prov }) {
                 out.add(Triple(prov, mod, key))
             }
@@ -540,10 +600,38 @@ class OnDeviceLLMClient(context: Context) {
                 }
             }
         }
-        val start = trimmed.indexOf('{')
-        val end = trimmed.lastIndexOf('}')
-        if (start != -1 && end > start) {
-            try { return JSONObject(trimmed.substring(start, end + 1)) } catch (_: Exception) {}
+        // Scan balanced {...} blocks cleanly (respecting strings/escapes) so prose around JSON doesn't break parsing
+        var depth = 0
+        var startIdx = -1
+        var inString = false
+        var escaped = false
+        for (i in trimmed.indices) {
+            val ch = trimmed[i]
+            if (escaped) {
+                escaped = false
+                continue
+            }
+            if (ch == '\\' && inString) {
+                escaped = true
+                continue
+            }
+            if (ch == '"') {
+                inString = !inString
+                continue
+            }
+            if (!inString) {
+                if (ch == '{') {
+                    if (depth == 0) startIdx = i
+                    depth++
+                } else if (ch == '}' && depth > 0) {
+                    depth--
+                    if (depth == 0 && startIdx != -1) {
+                        val candidate = trimmed.substring(startIdx, i + 1)
+                        try { return JSONObject(candidate) } catch (_: Exception) {}
+                        startIdx = -1
+                    }
+                }
+            }
         }
         return null
     }

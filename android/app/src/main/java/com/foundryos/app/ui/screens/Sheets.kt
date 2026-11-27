@@ -285,6 +285,7 @@ fun SettingsDialog(
     statusMessage: String?,
     statusIsSuccess: Boolean,
     getSavedKey: (String) -> String,
+    getSavedBaseUrl: (String) -> String,
     getCachedModels: (String) -> List<RemoteModelInfo>,
     getPluginToken: (String) -> String,
     getPluginClientId: (String) -> String,
@@ -305,6 +306,7 @@ fun SettingsDialog(
     onInstallAppUpdate: (String) -> Unit,
     onAddCustomProvider: (String, String, String) -> String,
     onDeleteCustomProvider: (String) -> Unit,
+    onSaveProviderBaseUrl: (String, String) -> Unit,
     onFetchModels: (String, String) -> Unit,
     onSelectAndTestModel: (String, String) -> Unit,
     onAddConnector: (String, String, String, Boolean) -> Unit,
@@ -312,7 +314,7 @@ fun SettingsDialog(
     onDismiss: () -> Unit,
 ) {
     var selectedProvider by remember {
-        mutableStateOf(providers.firstOrNull { it.configured }?.name ?: "openrouter")
+        mutableStateOf(providers.firstOrNull { it.configured }?.name ?: "freellmapi")
     }
     var showAddProviderForm by remember { mutableStateOf(false) }
     var customProvName by remember { mutableStateOf("") }
@@ -320,24 +322,31 @@ fun SettingsDialog(
     var customProvProtocol by remember { mutableStateOf("openai") }
 
     var apiKeyInput by remember { mutableStateOf(getSavedKey(selectedProvider)) }
+    var gatewayUrlInput by remember { mutableStateOf(getSavedBaseUrl(selectedProvider)) }
     var showKey by remember { mutableStateOf(false) }
     var selectedModel by remember {
         mutableStateOf(providers.firstOrNull { it.name == selectedProvider }?.model ?: "")
     }
     var modelSearch by remember { mutableStateOf("") }
+    var freeOnlyFilter by remember { mutableStateOf(selectedProvider == "freellmapi") }
 
     LaunchedEffect(selectedProvider, providers) {
         apiKeyInput = getSavedKey(selectedProvider)
+        gatewayUrlInput = getSavedBaseUrl(selectedProvider)
         selectedModel = providers.firstOrNull { it.name == selectedProvider }?.model ?: ""
         modelSearch = ""
+        freeOnlyFilter = selectedProvider == "freellmapi"
     }
 
     val currentProviderInfo = providers.firstOrNull { it.name == selectedProvider }
     val liveModels = getCachedModels(selectedProvider)
-    val filteredModels = remember(liveModels, modelSearch) {
+    val filteredModels = remember(liveModels, modelSearch, freeOnlyFilter) {
         val q = modelSearch.trim().lowercase()
-        if (q.isBlank()) liveModels
-        else liveModels.filter { it.id.lowercase().contains(q) || it.name.lowercase().contains(q) }
+        liveModels.filter { m ->
+            val okFree = !freeOnlyFilter || m.isFree
+            val okSearch = q.isBlank() || m.id.lowercase().contains(q) || m.name.lowercase().contains(q)
+            okFree && okSearch
+        }
     }
 
     var connName by remember { mutableStateOf("") }
@@ -1024,8 +1033,8 @@ fun SettingsDialog(
             val configuredProvidersCount = providers.count { it.configured }
             CollapsibleSectionHeader(
                 title = "External API Keys & Custom LLMs",
-                subtitle = "OpenRouter, Gemini, OpenAI, Anthropic, Custom endpoints",
-                badgeText = if (configuredProvidersCount > 0) "$configuredProvidersCount key(s)" else "Optional",
+                subtitle = "FreeLLMAPI (Free Models), OpenRouter, Gemini, OpenAI, Custom",
+                badgeText = if (configuredProvidersCount > 0) "$configuredProvidersCount key(s)" else "Free Pool",
                 badgeBg = if (configuredProvidersCount > 0) FoundryColors.GreenBg else Color.White,
                 badgeInk = if (configuredProvidersCount > 0) FoundryColors.GreenInk else FoundryColors.InkSecondary,
                 expanded = expandExternalLlmSection,
@@ -1182,6 +1191,40 @@ fun SettingsDialog(
                 }
             }
 
+            if (selectedProvider == "freellmapi" && !showAddProviderForm) {
+                Spacer(Modifier.height(8.dp))
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(FoundryColors.GreenBg.copy(alpha = 0.55f))
+                        .border(1.dp, FoundryColors.GreenInk.copy(alpha = 0.25f), RoundedCornerShape(12.dp))
+                        .padding(10.dp),
+                ) {
+                    Text(
+                        text = "🌐 FreeLLMAPI · Multi-Provider Free Models",
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = FoundryColors.GreenInk,
+                    )
+                    Text(
+                        text = "Uses your FreeLLMAPI gateway (http://127.0.0.1:3001 via ADB/Termux, LAN IP, or HTTPS tunnel) and automatically unlocks 'auto' + all available free models.",
+                        fontSize = 11.sp,
+                        color = FoundryColors.InkSecondary,
+                    )
+                    Spacer(Modifier.height(6.dp))
+                    OutlinedTextField(
+                        value = gatewayUrlInput,
+                        onValueChange = { gatewayUrlInput = it },
+                        label = { Text("FreeLLMAPI Gateway URL") },
+                        placeholder = { Text("http://127.0.0.1:3001") },
+                        singleLine = true,
+                        shape = RoundedCornerShape(12.dp),
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+            }
+
             Spacer(Modifier.height(10.dp))
 
             // STEP 1: API Key -> Query Provider API first
@@ -1194,8 +1237,8 @@ fun SettingsDialog(
             OutlinedTextField(
                 value = apiKeyInput,
                 onValueChange = { apiKeyInput = it },
-                label = { Text("$selectedProvider API Key") },
-                placeholder = { Text("Paste your API key here") },
+                label = { Text(if (selectedProvider == "freellmapi") "FreeLLMAPI Token (freellmapi-...)" else "$selectedProvider API Key") },
+                placeholder = { Text(if (selectedProvider == "freellmapi") "freellmapi-..." else "Paste your API key here") },
                 singleLine = true,
                 visualTransformation = if (showKey) VisualTransformation.None else PasswordVisualTransformation(),
                 trailingIcon = {
@@ -1210,13 +1253,21 @@ fun SettingsDialog(
                 modifier = Modifier.fillMaxWidth(),
             )
             Spacer(Modifier.height(8.dp))
+            val canQueryModels = !isFetchingModels && (
+                apiKeyInput.isNotBlank() ||
+                    currentProviderInfo?.isCustom == true ||
+                    (selectedProvider == "freellmapi" && gatewayUrlInput.trim().startsWith("http"))
+                )
             Button(
                 onClick = {
-                    if (!isFetchingModels && (apiKeyInput.isNotBlank() || currentProviderInfo?.isCustom == true)) {
+                    if (canQueryModels) {
+                        if (selectedProvider == "freellmapi" && gatewayUrlInput.trim().startsWith("http")) {
+                            onSaveProviderBaseUrl("freellmapi", gatewayUrlInput.trim())
+                        }
                         onFetchModels(selectedProvider, apiKeyInput.trim())
                     }
                 },
-                enabled = !isFetchingModels && (apiKeyInput.isNotBlank() || currentProviderInfo?.isCustom == true),
+                enabled = canQueryModels,
                 shape = RoundedCornerShape(999.dp),
                 colors = ButtonDefaults.buttonColors(containerColor = FoundryColors.InkPrimary),
                 modifier = Modifier.fillMaxWidth().height(44.dp),
@@ -1246,11 +1297,39 @@ fun SettingsDialog(
             // STEP 2: Real Model Picker populated exclusively from the API response
             if (liveModels.isNotEmpty()) {
                 Spacer(Modifier.height(14.dp))
-                Text(
-                    text = "Step 2 · Pick an available model (${liveModels.size} live)",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = FoundryColors.InkSecondary,
-                )
+                val freeModelsCount = liveModels.count { it.isFree }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        text = "Step 2 · Pick model (${filteredModels.size}/${liveModels.size})",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = FoundryColors.InkSecondary,
+                    )
+                    if (freeModelsCount > 0) {
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(999.dp))
+                                .background(if (freeOnlyFilter) FoundryColors.GreenBg else FoundryColors.SoftSurface)
+                                .border(
+                                    1.dp,
+                                    if (freeOnlyFilter) FoundryColors.GreenInk.copy(alpha = 0.4f) else FoundryColors.Border,
+                                    RoundedCornerShape(999.dp),
+                                )
+                                .clickable { freeOnlyFilter = !freeOnlyFilter }
+                                .padding(horizontal = 10.dp, vertical = 4.dp),
+                        ) {
+                            Text(
+                                text = if (freeOnlyFilter) "✓ Free only ($freeModelsCount)" else "Free only ($freeModelsCount)",
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = if (freeOnlyFilter) FoundryColors.GreenInk else FoundryColors.InkSecondary,
+                            )
+                        }
+                    }
+                }
                 Spacer(Modifier.height(6.dp))
                 OutlinedTextField(
                     value = modelSearch,

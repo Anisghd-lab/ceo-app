@@ -578,64 +578,30 @@ class AgyRuntimeManager(private val context: Context) {
                         addLog(line)
                         return@forEachLine
                     }
-                    val obj = runCatching { JSONObject(line) }.getOrNull()
-                    if (obj != null) {
-                        when (obj.optString("event").lowercase()) {
-                            "step_update" -> {
-                                val su = obj.optJSONObject("step_update")
-                                val stepType = su?.optString("step_type").orEmpty().lowercase()
-                                val textDelta = su?.optString("text_delta").orEmpty()
-                                val thinkingDelta = su?.optString("thinking_delta").orEmpty()
-                                    .ifBlank { su?.optString("thought").orEmpty() }
-                                    .ifBlank { su?.optString("reasoning").orEmpty() }
-                                if (thinkingDelta.isNotBlank()) {
-                                    scope.launch { onThinkingDelta(thinkingDelta) }
-                                }
-                                if (stepType.contains("think") || thinkingDelta.isNotBlank()) {
-                                    scope.launch { onStatus("Reasoning via agy (${chosenModel.ifBlank { "auto" }})...") }
-                                } else if (stepType.contains("tool")) {
-                                    val tName = su?.optString("tool_name").orEmpty()
-                                        .ifBlank { su?.optString("name").orEmpty() }
-                                        .ifBlank { stepType }
-                                    val tArgs = su?.optString("arguments").orEmpty().take(120)
-                                    scope.launch {
-                                        onStatus("agy → $tName...")
-                                        onThinkingDelta("\n[CLI Tool: $tName${if (tArgs.isNotBlank()) " $tArgs" else ""}]\n")
-                                    }
-                                } else if (stepType == "agent_response" && textDelta.isNotBlank()) {
-                                    streamedResponse.append(textDelta)
-                                    scope.launch { onThinkingDelta(textDelta) }
-                                }
+                    val trimmedLine = line
+                    if (trimmedLine.startsWith("{")) {
+                        val ev = parseStreamJsonLine(trimmedLine)
+                        when (ev.kind) {
+                            "thinking" -> {
+                                if (ev.text.isNotBlank()) scope.launch { onThinkingDelta(ev.text) }
+                                scope.launch { onStatus("Reasoning via agy (${chosenModel.ifBlank { "auto" }})...") }
+                            }
+                            "tool" -> scope.launch {
+                                onStatus("agy → ${ev.toolName}...")
+                                onThinkingDelta("\n[CLI Tool: ${ev.toolName}${if (ev.toolArgs.isNotBlank()) " ${ev.toolArgs}" else ""}]\n")
+                            }
+                            "text_delta" -> if (ev.text.isNotBlank()) {
+                                streamedResponse.append(ev.text)
+                                scope.launch { onThinkingDelta(ev.text) }
                             }
                             "result" -> {
-                                val r = obj.optJSONObject("result")
-                                if (r != null) {
-                                    resultStatus = r.optString("status")
-                                    resultError = r.optString("error")
-                                    val respText = r.optString("response")
-                                    if (respText.isNotBlank()) {
-                                        finalResultResponse = respText
-                                    }
-                                }
-                            }
-                            else -> {
-                                val legacyType = obj.optString("type").lowercase()
-                                val legacyText = obj.optString("text").ifBlank { obj.optString("content") }
-                                    .ifBlank { obj.optString("result") }
-                                if (legacyType.contains("tool")) {
-                                    val tName = obj.optString("name", "working")
-                                    scope.launch {
-                                        onStatus("agy: $tName...")
-                                        onThinkingDelta("\n[CLI Tool: $tName]\n")
-                                    }
-                                } else if (legacyText.isNotBlank()) {
-                                    streamedResponse.append(legacyText)
-                                    scope.launch { onThinkingDelta(legacyText) }
-                                }
+                                resultStatus = ev.resultStatus
+                                resultError = ev.resultError
+                                if (ev.finalResponse.isNotBlank()) finalResultResponse = ev.finalResponse
                             }
                         }
-                    } else if (!line.startsWith("{\"event\"")) {
-                        nonJsonFallback.append(line).append('\n')
+                    } else if (!trimmedLine.startsWith("{\"event\"")) {
+                        nonJsonFallback.append(trimmedLine).append('\n')
                     }
                 }
 
@@ -659,6 +625,71 @@ class AgyRuntimeManager(private val context: Context) {
             } catch (e: Exception) {
                 activeRunProcess = null
                 false to (e.message ?: "agy execution failed")
+            }
+        }
+    }
+
+    data class AgyStreamEvent(
+        val kind: String, // "thinking", "tool", "text_delta", "result", "ignored"
+        val text: String = "",
+        val toolName: String = "",
+        val toolArgs: String = "",
+        val resultStatus: String = "",
+        val resultError: String = "",
+        val finalResponse: String = "",
+    )
+
+    companion object {
+        internal fun parseStreamJsonLine(line: String): AgyStreamEvent {
+            val trimmed = line.trim()
+            if (trimmed.isBlank()) return AgyStreamEvent("ignored")
+            val obj = runCatching { JSONObject(trimmed) }.getOrNull() ?: return AgyStreamEvent("ignored")
+            return when (obj.optString("event").lowercase()) {
+                "step_update" -> {
+                    val su = obj.optJSONObject("step_update") ?: return AgyStreamEvent("ignored")
+                    val stepType = su.optString("step_type").lowercase()
+                    val textDelta = su.optString("text_delta")
+                    val thinkingDelta = su.optString("thinking_delta")
+                        .ifBlank { su.optString("thought") }
+                        .ifBlank { su.optString("reasoning") }
+                    when {
+                        stepType.contains("tool") -> {
+                            val tName = su.optString("tool_name")
+                                .ifBlank { su.optString("name") }
+                                .ifBlank { stepType }
+                            val tArgs = su.optString("arguments")
+                                .ifBlank { su.optJSONObject("tool_info")?.optJSONObject("parameters")?.toString().orEmpty() }
+                                .take(120)
+                            AgyStreamEvent("tool", toolName = tName, toolArgs = tArgs)
+                        }
+                        thinkingDelta.isNotBlank() || stepType.contains("think") ->
+                            AgyStreamEvent("thinking", text = thinkingDelta)
+                        stepType == "agent_response" && textDelta.isNotBlank() ->
+                            AgyStreamEvent("text_delta", text = textDelta)
+                        else -> AgyStreamEvent("ignored")
+                    }
+                }
+                "result" -> {
+                    val r = obj.optJSONObject("result") ?: return AgyStreamEvent("ignored")
+                    AgyStreamEvent(
+                        kind = "result",
+                        resultStatus = r.optString("status"),
+                        resultError = r.optString("error"),
+                        finalResponse = r.optString("response"),
+                    )
+                }
+                else -> {
+                    val legacyType = obj.optString("type").lowercase()
+                    val legacyText = obj.optString("text").ifBlank { obj.optString("content") }
+                        .ifBlank { obj.optString("result") }
+                    when {
+                        legacyType.contains("tool") ->
+                            AgyStreamEvent("tool", toolName = obj.optString("name", "working"))
+                        legacyText.isNotBlank() ->
+                            AgyStreamEvent("text_delta", text = legacyText)
+                        else -> AgyStreamEvent("ignored")
+                    }
+                }
             }
         }
     }

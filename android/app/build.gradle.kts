@@ -13,8 +13,8 @@ android {
         minSdk = 26
         // Required (matching AntiGem / Termux) so Android allows execve() on the downloaded native agy binary inside filesDir
         targetSdk = 28
-        versionCode = 11
-        versionName = "0.6.1"
+        versionCode = 12
+        versionName = "0.7.0"
     }
 
     signingConfigs {
@@ -62,6 +62,13 @@ android {
         compose = true
     }
 
+    testOptions {
+        unitTests {
+            isIncludeAndroidResources = true
+            isReturnDefaultValues = true
+        }
+    }
+
     packaging {
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
@@ -84,4 +91,10 @@ dependencies {
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
     implementation("org.apache.commons:commons-compress:1.26.1")
+
+    testImplementation("junit:junit:4.13.2")
+    testImplementation("org.robolectric:robolectric:4.13")
+    testImplementation("androidx.test:core:1.6.1")
+    testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.9.0")
+    testImplementation("com.squareup.okhttp3:mockwebserver:4.12.0")
 }

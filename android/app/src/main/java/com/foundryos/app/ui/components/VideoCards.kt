@@ -51,6 +51,7 @@ fun CompanyOrgCard(
     subtitle: String,
     bots: List<BotItem>,
     connectors: List<String> = emptyList(),
+    workingBotIds: Set<String> = emptySet(),
     onBotClick: ((BotItem) -> Unit)? = null,
     modifier: Modifier = Modifier,
 ) {
@@ -83,7 +84,7 @@ fun CompanyOrgCard(
                     .padding(vertical = 6.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                BotMascot(shape = bot.avatarShape, colorHex = bot.avatarColor, size = 34.dp)
+                BotMascot(shape = bot.avatarShape, colorHex = bot.avatarColor, size = 34.dp, isWorking = bot.id in workingBotIds)
                 Spacer(Modifier.width(12.dp))
                 Column(modifier = Modifier.weight(1f)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {

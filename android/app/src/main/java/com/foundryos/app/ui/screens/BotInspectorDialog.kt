@@ -136,7 +136,7 @@ fun BotInspectorDialog(
                 horizontalArrangement = Arrangement.SpaceBetween,
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
-                    BotMascot(shape = bot.avatarShape, colorHex = bot.avatarColor, size = 40.dp)
+                    BotMascot(shape = bot.avatarShape, colorHex = bot.avatarColor, size = 40.dp, isWorking = isWorking)
                     Spacer(Modifier.width(10.dp))
                     Column(modifier = Modifier.weight(1f)) {
                         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -242,6 +242,31 @@ fun BotInspectorDialog(
                             Spacer(Modifier.height(3.dp))
                             Text(thought.takeLast(500), fontSize = 11.5.sp, color = FoundryColors.InkPrimary)
                         }
+                    }
+                }
+
+                // CEO-Assigned Role & Bespoke System Prompt
+                if (bot.systemPrompt.isNotBlank()) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(14.dp))
+                            .background(Color.White)
+                            .border(1.dp, FoundryColors.Border, RoundedCornerShape(14.dp))
+                            .padding(12.dp),
+                    ) {
+                        Text(
+                            text = "CEO Role & Assigned Prompt",
+                            fontSize = 11.5.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = FoundryColors.InkSecondary,
+                        )
+                        Spacer(Modifier.height(4.dp))
+                        Text(
+                            text = bot.systemPrompt,
+                            fontSize = 11.5.sp,
+                            color = FoundryColors.InkPrimary,
+                        )
                     }
                 }
 

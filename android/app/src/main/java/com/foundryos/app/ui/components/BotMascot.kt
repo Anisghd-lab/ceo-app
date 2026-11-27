@@ -1,5 +1,12 @@
 package com.foundryos.app.ui.components
 
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -10,6 +17,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.CornerRadius
@@ -18,7 +26,9 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.DrawScope
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.rotate
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
@@ -37,6 +47,7 @@ fun parseHexColor(hex: String, fallback: Color = Color(0xFF111111)): Color {
 /**
  * Exact geometric mascot icons from the reference video:
  * solid geometric shape + 2 crisp white vertical pill-eyes looking slightly right.
+ * Animates ONLY when `isWorking == true` (active execution / reasoning).
  */
 @Composable
 fun BotMascot(
@@ -44,11 +55,84 @@ fun BotMascot(
     colorHex: String,
     size: Dp = 36.dp,
     badgeCount: Int = 0,
+    isWorking: Boolean = false,
     modifier: Modifier = Modifier,
 ) {
     val fill = parseHexColor(colorHex)
+
+    val workingTransition = if (isWorking) rememberInfiniteTransition(label = "bot_working") else null
+    val pulseScale = workingTransition?.animateFloat(
+        initialValue = 0.97f,
+        targetValue = 1.07f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 680, easing = FastOutSlowInEasing),
+            repeatMode = RepeatMode.Reverse,
+        ),
+        label = "pulseScale",
+    )?.value ?: 1f
+    val tiltDeg = workingTransition?.animateFloat(
+        initialValue = -5f,
+        targetValue = 5f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 820, easing = FastOutSlowInEasing),
+            repeatMode = RepeatMode.Reverse,
+        ),
+        label = "tiltDeg",
+    )?.value ?: 0f
+    val bobY = workingTransition?.animateFloat(
+        initialValue = -2.2f,
+        targetValue = 2.2f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 740, easing = FastOutSlowInEasing),
+            repeatMode = RepeatMode.Reverse,
+        ),
+        label = "bobY",
+    )?.value ?: 0f
+    val auraProgress = workingTransition?.animateFloat(
+        initialValue = 0f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 1200, easing = LinearEasing),
+            repeatMode = RepeatMode.Restart,
+        ),
+        label = "auraProgress",
+    )?.value ?: 0f
+    val eyeShift = workingTransition?.animateFloat(
+        initialValue = -0.025f,
+        targetValue = 0.03f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 900, easing = FastOutSlowInEasing),
+            repeatMode = RepeatMode.Reverse,
+        ),
+        label = "eyeShift",
+    )?.value ?: 0f
+
     Box(modifier = modifier.size(size), contentAlignment = Alignment.Center) {
-        Canvas(modifier = Modifier.size(size)) {
+        if (isWorking) {
+            Canvas(modifier = Modifier.size(size)) {
+                val auraColor = if (fill == Color(0xFF111111)) Color(0xFF10B981) else fill
+                val maxR = this.size.minDimension * 0.62f
+                val minR = this.size.minDimension * 0.44f
+                val curR = minR + (maxR - minR) * auraProgress
+                drawCircle(
+                    color = auraColor.copy(alpha = (1f - auraProgress) * 0.55f),
+                    radius = curR,
+                    style = Stroke(width = 2.2.dp.toPx()),
+                )
+            }
+        }
+        Canvas(
+            modifier = Modifier
+                .size(size)
+                .graphicsLayer {
+                    if (isWorking) {
+                        scaleX = pulseScale
+                        scaleY = pulseScale
+                        rotationZ = tiltDeg
+                        translationY = bobY
+                    }
+                },
+        ) {
             val w = this.size.width
             val h = this.size.height
             when (shape.lowercase()) {
@@ -87,7 +171,7 @@ fun BotMascot(
             val eyeH = h * 0.22f
             val eyeRadius = CornerRadius(eyeW / 2f, eyeW / 2f)
             val yOffset = if (shape.lowercase() == "triangle") h * 0.49f else h * 0.36f
-            val leftX = if (shape.lowercase() == "circle") w * 0.50f else w * 0.39f
+            val leftX = (if (shape.lowercase() == "circle") w * 0.50f else w * 0.39f) + (w * eyeShift)
             val rightX = leftX + w * 0.15f
 
             rotate(degrees = if (shape.lowercase() == "circle") 8f else 0f, pivot = Offset(w / 2f, h / 2f)) {

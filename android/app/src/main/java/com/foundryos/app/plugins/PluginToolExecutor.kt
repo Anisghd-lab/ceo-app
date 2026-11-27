@@ -1,7 +1,6 @@
 package com.foundryos.app.plugins
 
 import android.content.Context
-import android.net.Uri
 import android.webkit.CookieManager
 import com.foundryos.app.data.PluginAuthType
 import com.foundryos.app.data.PluginToolResult
@@ -15,6 +14,7 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
+import java.net.URLEncoder
 import java.util.Base64
 import java.util.concurrent.TimeUnit
 
@@ -37,6 +37,14 @@ class PluginToolExecutor(
         .readTimeout(30, TimeUnit.SECONDS)
         .followRedirects(true)
         .build()
+
+    // Test hook (empty in production) so unit tests can point plugin REST calls at MockWebServer
+    internal var apiBaseOverrides: MutableMap<String, String> = mutableMapOf()
+
+    private fun enc(s: String): String = URLEncoder.encode(s, "UTF-8")
+
+    private fun baseUrl(key: String, defaultBase: String): String =
+        (apiBaseOverrides[key] ?: defaultBase).trimEnd('/')
 
     fun activeToolsSummaryForPrompt(): String {
         val statuses = auth.getPluginStatuses()
@@ -120,30 +128,131 @@ class PluginToolExecutor(
 
     private fun execBrowserSearch(query: String): PluginToolResult {
         if (query.isBlank()) return PluginToolResult(false, "Missing search query")
-        val url = "https://html.duckduckgo.com/html/?q=${Uri.encode(query)}"
-        val req = Request.Builder()
-            .url(url)
-            .header("User-Agent", "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 Chrome/131.0.0.0 Mobile Safari/537.36")
-            .get()
-            .build()
-        return http.newCall(req).execute().use { resp ->
-            val html = resp.body?.string().orEmpty()
-            val linkRegex = Regex("""<a[^>]*class="result__a"[^>]*href="([^"]+)"[^>]*>(.*?)</a>""", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL))
-            val snipRegex = Regex("""<a[^>]*class="result__snippet"[^>]*>(.*?)</a>""", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL))
-            val links = linkRegex.findAll(html).take(8).toList()
-            val snips = snipRegex.findAll(html).take(8).toList()
-            val out = JSONArray()
-            links.forEachIndexed { idx, m ->
-                val rawHref = m.groupValues[1]
-                val cleanTitle = stripHtml(m.groupValues[2])
-                val snippet = snips.getOrNull(idx)?.groupValues?.get(1)?.let { stripHtml(it) }.orEmpty()
-                out.put(JSONObject().put("title", cleanTitle).put("url", rawHref).put("snippet", snippet))
+        val qEnc = enc(query)
+        val aggregated = JSONArray()
+        val errors = mutableListOf<String>()
+        val ua = "CEO-Android/0.7 (https://github.com/Anisghd-lab/ceo-app)"
+
+        // Source 1: Wikipedia OpenSearch JSON API (structured, fast, no bot challenge)
+        val wikiBase = baseUrl("wikipedia", "https://en.wikipedia.org")
+        runCatching {
+            val req = Request.Builder()
+                .url("$wikiBase/w/api.php?action=opensearch&search=$qEnc&limit=5&namespace=0&format=json")
+                .header("User-Agent", ua)
+                .get()
+                .build()
+            http.newCall(req).execute().use { resp ->
+                if (resp.isSuccessful) {
+                    val arr = JSONArray(resp.body?.string().orEmpty())
+                    val titles = arr.optJSONArray(1) ?: JSONArray()
+                    val descs = arr.optJSONArray(2) ?: JSONArray()
+                    val urls = arr.optJSONArray(3) ?: JSONArray()
+                    for (i in 0 until titles.length()) {
+                        val u = urls.optString(i)
+                        if (u.isNotBlank()) {
+                            aggregated.put(
+                                JSONObject()
+                                    .put("source", "wikipedia")
+                                    .put("title", titles.optString(i))
+                                    .put("url", u)
+                                    .put("snippet", descs.optString(i))
+                            )
+                        }
+                    }
+                } else {
+                    errors.add("wikipedia HTTP ${resp.code}")
+                }
             }
-            if (out.length() == 0) {
-                PluginToolResult(true, stripHtml(html).take(3500))
-            } else {
-                PluginToolResult(true, out.toString())
+        }.onFailure { errors.add("wikipedia: ${it.message}") }
+
+        // Source 2: DuckDuckGo Instant Answer JSON API
+        val ddgBase = baseUrl("ddg_instant", "https://api.duckduckgo.com")
+        runCatching {
+            val req = Request.Builder()
+                .url("$ddgBase/?q=$qEnc&format=json&no_html=1&skip_disambig=1")
+                .header("User-Agent", ua)
+                .get()
+                .build()
+            http.newCall(req).execute().use { resp ->
+                if (resp.isSuccessful) {
+                    val obj = JSONObject(resp.body?.string().orEmpty())
+                    val abs = obj.optString("AbstractText")
+                    val absUrl = obj.optString("AbstractURL")
+                    if (abs.isNotBlank() && absUrl.isNotBlank()) {
+                        aggregated.put(
+                            JSONObject()
+                                .put("source", "duckduckgo_instant")
+                                .put("title", obj.optString("Heading").ifBlank { query })
+                                .put("url", absUrl)
+                                .put("snippet", abs.take(320))
+                        )
+                    }
+                    val related = obj.optJSONArray("RelatedTopics") ?: JSONArray()
+                    for (i in 0 until minOf(related.length(), 4)) {
+                        val rt = related.optJSONObject(i) ?: continue
+                        val firstUrl = rt.optString("FirstURL")
+                        val txt = rt.optString("Text")
+                        if (firstUrl.isNotBlank() && txt.isNotBlank()) {
+                            aggregated.put(
+                                JSONObject()
+                                    .put("source", "duckduckgo_related")
+                                    .put("title", txt.substringBefore(" - ").take(90))
+                                    .put("url", firstUrl)
+                                    .put("snippet", txt.take(260))
+                            )
+                        }
+                    }
+                } else {
+                    errors.add("ddg HTTP ${resp.code}")
+                }
             }
+        }.onFailure { errors.add("ddg: ${it.message}") }
+
+        // Source 3: Hacker News Algolia Search JSON API (great for tech/startup/product research)
+        val hnBase = baseUrl("hn_algolia", "https://hn.algolia.com")
+        runCatching {
+            val req = Request.Builder()
+                .url("$hnBase/api/v1/search?query=$qEnc&hitsPerPage=4")
+                .header("User-Agent", ua)
+                .get()
+                .build()
+            http.newCall(req).execute().use { resp ->
+                if (resp.isSuccessful) {
+                    val hits = JSONObject(resp.body?.string().orEmpty()).optJSONArray("hits") ?: JSONArray()
+                    for (i in 0 until hits.length()) {
+                        val h = hits.optJSONObject(i) ?: continue
+                        val title = h.optString("title")
+                        val link = h.optString("url").ifBlank { "https://news.ycombinator.com/item?id=${h.optString("objectID")}" }
+                        if (title.isNotBlank()) {
+                            aggregated.put(
+                                JSONObject()
+                                    .put("source", "hackernews")
+                                    .put("title", title)
+                                    .put("url", link)
+                                    .put("snippet", "points=${h.optInt("points", 0)}, comments=${h.optInt("num_comments", 0)}")
+                            )
+                        }
+                    }
+                } else {
+                    errors.add("hn HTTP ${resp.code}")
+                }
+            }
+        }.onFailure { errors.add("hn: ${it.message}") }
+
+        return if (aggregated.length() > 0) {
+            PluginToolResult(
+                true,
+                JSONObject()
+                    .put("query", query)
+                    .put("count", aggregated.length())
+                    .put("results", aggregated)
+                    .toString(),
+            )
+        } else {
+            PluginToolResult(
+                false,
+                "Web search returned 0 results for '$query' (${errors.joinToString("; ").ifBlank { "no matches" }}).",
+            )
         }
     }
 
@@ -194,7 +303,7 @@ class PluginToolExecutor(
 
     private fun execGitHubRepos(): PluginToolResult {
         val tok = requireToken("github", "GitHub") ?: return PluginToolResult(false, "GitHub not connected. Connect GitHub in Settings -> Plugins.")
-        val req = Request.Builder().url("https://api.github.com/user/repos?sort=updated&per_page=15")
+        val req = Request.Builder().url("${baseUrl("github", "https://api.github.com")}/user/repos?sort=updated&per_page=15")
             .header("Authorization", "Bearer $tok").header("Accept", "application/vnd.github+json").get().build()
         return http.newCall(req).execute().use { resp ->
             val raw = resp.body?.string().orEmpty()
@@ -214,7 +323,7 @@ class PluginToolExecutor(
         val owner = args.optString("owner")
         val repo = args.optString("repo")
         val path = args.optString("path").trimStart('/')
-        val b = Request.Builder().url("https://api.github.com/repos/$owner/$repo/contents/$path")
+        val b = Request.Builder().url("${baseUrl("github", "https://api.github.com")}/repos/$owner/$repo/contents/$path")
             .header("Accept", "application/vnd.github.raw+json")
         if (tok.isNotBlank()) b.header("Authorization", "Bearer $tok")
         return http.newCall(b.get().build()).execute().use { resp ->
@@ -227,7 +336,7 @@ class PluginToolExecutor(
         val owner = args.optString("owner")
         val repo = args.optString("repo")
         val payload = JSONObject().put("title", args.optString("title")).put("body", args.optString("body"))
-        val req = Request.Builder().url("https://api.github.com/repos/$owner/$repo/issues")
+        val req = Request.Builder().url("${baseUrl("github", "https://api.github.com")}/repos/$owner/$repo/issues")
             .header("Authorization", "Bearer $tok").header("Accept", "application/vnd.github+json")
             .post(payload.toString().toRequestBody(jsonMedia)).build()
         return http.newCall(req).execute().use { resp ->
@@ -238,7 +347,7 @@ class PluginToolExecutor(
     private fun execNotionSearch(query: String): PluginToolResult {
         val tok = requireToken("notion", "Notion") ?: return PluginToolResult(false, "Notion not connected. Connect Notion in Settings -> Plugins.")
         val body = JSONObject().put("query", query).put("page_size", 10)
-        val req = Request.Builder().url("https://api.notion.com/v1/search")
+        val req = Request.Builder().url("${baseUrl("notion", "https://api.notion.com")}/v1/search")
             .header("Authorization", "Bearer $tok").header("Notion-Version", "2022-06-28")
             .post(body.toString().toRequestBody(jsonMedia)).build()
         return http.newCall(req).execute().use { resp ->
@@ -304,7 +413,7 @@ class PluginToolExecutor(
 
     private fun execGmailSearch(args: JSONObject): PluginToolResult {
         val tok = requireToken("gmail", "Gmail") ?: return PluginToolResult(false, "Gmail not connected. Connect Gmail in Settings -> Plugins.")
-        val q = Uri.encode(args.optString("query").ifBlank { "in:inbox" })
+        val q = enc(args.optString("query").ifBlank { "in:inbox" })
         val max = args.optInt("max", 10).coerceIn(1, 20)
         val req = Request.Builder().url("https://gmail.googleapis.com/gmail/v1/users/me/messages?q=$q&maxResults=$max")
             .header("Authorization", "Bearer $tok").get().build()
@@ -336,7 +445,7 @@ class PluginToolExecutor(
 
     private fun execDriveSearch(query: String): PluginToolResult {
         val tok = requireToken("gdrive", "Google Drive") ?: return PluginToolResult(false, "Google Drive not connected. Connect Google Drive in Settings -> Plugins.")
-        val q = Uri.encode("name contains '${query.replace("'", "\\'")}' and trashed = false")
+        val q = enc("name contains '${query.replace("'", "\\'")}' and trashed = false")
         val req = Request.Builder().url("https://www.googleapis.com/drive/v3/files?q=$q&fields=files(id,name,mimeType,modifiedTime)&pageSize=15")
             .header("Authorization", "Bearer $tok").get().build()
         return http.newCall(req).execute().use { resp ->
@@ -388,7 +497,7 @@ class PluginToolExecutor(
 
     private fun execCanvaDesigns(query: String): PluginToolResult {
         val tok = requireToken("canva", "Canva") ?: return PluginToolResult(false, "Canva not connected. Connect Canva in Settings -> Plugins.")
-        val q = if (query.isBlank()) "" else "?query=${Uri.encode(query)}"
+        val q = if (query.isBlank()) "" else "?query=${enc(query)}"
         val req = Request.Builder().url("https://api.canva.com/rest/v1/designs$q")
             .header("Authorization", "Bearer $tok").get().build()
         return http.newCall(req).execute().use { resp ->
@@ -398,7 +507,7 @@ class PluginToolExecutor(
 
     private fun execSciteSearch(query: String): PluginToolResult {
         val tok = auth.getAccessToken("scite")
-        val url = "https://api.scite.ai/search?term=${Uri.encode(query)}&limit=8"
+        val url = "https://api.scite.ai/search?term=${enc(query)}&limit=8"
         val b = Request.Builder().url(url).get()
         if (tok.isNotBlank()) b.header("Authorization", "Bearer $tok")
         return http.newCall(b.build()).execute().use { resp ->

@@ -104,7 +104,11 @@ class OnDeviceSandbox(private val context: Context) {
 
         val pdf = PdfDocument()
         var pageNum = 1
-        var page = pdf.startPage(PdfDocument.PageInfo.Builder(pageWidth, pageHeight, pageNum).create())
+        var page: PdfDocument.Page? = pdf.startPage(PdfDocument.PageInfo.Builder(pageWidth, pageHeight, pageNum).create())
+        if (page == null) {
+            runCatching { pdf.close() }
+            return writeBasicPdfFallback(outFile, title, subtitle, sections)
+        }
         var canvas = page.canvas
 
         val titlePaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -185,6 +189,61 @@ class OnDeviceSandbox(private val context: Context) {
             pdf.writeTo(fos)
         }
         pdf.close()
+        if (!outFile.exists() || outFile.length() < 120) {
+            return writeBasicPdfFallback(outFile, title, subtitle, sections)
+        }
+        return outFile
+    }
+
+    /**
+     * Minimal valid %PDF-1.4 fallback used only if Android PdfDocument cannot render (e.g. JVM unit tests).
+     */
+    private fun writeBasicPdfFallback(
+        outFile: File,
+        title: String,
+        subtitle: String,
+        sections: List<Pair<String, String>>,
+    ): File {
+        fun escPdf(s: String): String = s
+            .replace("\\", "\\\\")
+            .replace("(", "\\(")
+            .replace(")", "\\)")
+            .replace(Regex("[\\r\\n]+"), " ")
+            .take(110)
+        val lines = mutableListOf<String>()
+        lines += escPdf(title)
+        if (subtitle.isNotBlank()) lines += escPdf(subtitle)
+        for ((h, b) in sections) {
+            lines += escPdf(h)
+            b.chunked(95).take(24).forEach { lines += escPdf(it) }
+        }
+        val stream = buildString {
+            append("BT\n/F1 12 Tf\n48 790 Td\n16 TL\n")
+            lines.forEachIndexed { idx, line ->
+                if (idx == 0) append("($line) Tj\n") else append("T* ($line) Tj\n")
+            }
+            append("ET\n")
+        }
+        val streamBytes = stream.toByteArray(Charsets.US_ASCII)
+        val sb = StringBuilder()
+        val offsets = mutableListOf<Int>()
+        fun addObj(num: Int, body: String) {
+            offsets += sb.length
+            sb.append("$num 0 obj\n$body\nendobj\n")
+        }
+        sb.append("%PDF-1.4\n")
+        addObj(1, "<< /Type /Catalog /Pages 2 0 R >>")
+        addObj(2, "<< /Type /Pages /Kids [3 0 R] /Count 1 >>")
+        addObj(3, "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>")
+        addObj(4, "<< /Length ${streamBytes.size} >>\nstream\n$stream\nendstream")
+        addObj(5, "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>")
+        val xrefPos = sb.length
+        sb.append("xref\n0 6\n0000000000 65535 f \n")
+        for (off in offsets) {
+            sb.append(String.format("%010d 00000 n \n", off))
+        }
+        sb.append("trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n$xrefPos\n%%EOF\n")
+        outFile.writeText(sb.toString(), Charsets.US_ASCII)
         return outFile
     }
 

@@ -111,6 +111,7 @@ import com.foundryos.app.data.FoundryRepository
 import com.foundryos.app.data.PluginStatus
 import com.foundryos.app.data.ProviderStatus
 import com.foundryos.app.data.QueuedFounderMessage
+import com.foundryos.app.service.AgentExecutionService
 import com.foundryos.app.service.ApprovalNotifier
 import com.foundryos.app.ui.components.ArtifactDeliverableCard
 import com.foundryos.app.ui.components.BoardMeetingCard
@@ -274,10 +275,13 @@ fun FoundryMainScreen(repo: FoundryRepository) {
         }
     }
 
-    // Live 1s timer while reasoning/bots are actively working
-    LaunchedEffect(liveReasoning.active, isBusy) {
+    // Live 1s timer & periodic DB refresh while reasoning/background service is active
+    LaunchedEffect(liveReasoning.active, isBusy, activeCompanyId) {
+        var tick = 0
         while (liveReasoning.active || isBusy) {
             nowMs = System.currentTimeMillis()
+            if (tick % 2 == 1) refreshAll(activeCompanyId)
+            tick++
             delay(1000)
         }
     }
@@ -288,32 +292,49 @@ fun FoundryMainScreen(repo: FoundryRepository) {
         filesToSend: List<AttachedLocalFile>,
         targetBotId: String?,
     ) {
-        activeRunJob = scope.launch {
-            isBusy = true
+        val startLabel = if (companyId == null) "CEO creating company..." else "Bots working..."
+        isBusy = true
+        busyLabel = startLabel
+        AgentExecutionService.onStopRequested = {
+            repo.stopAllExecution()
+            scope.launch {
+                isBusy = false
+                busyLabel = ""
+            }
+        }
+        AgentExecutionService.enqueueTask(context, startLabel) {
             try {
                 if (companyId == null) {
                     val desc = text.ifBlank {
                         "Company working with ${filesToSend.joinToString(", ") { it.name }}"
                     }
                     busyLabel = "CEO is hiring your company..."
+                    AgentExecutionService.updateStatus(context, busyLabel)
                     val prop = repo.proposeCompany(desc)
                     val created = repo.deployCompany(desc, prop)
                     if (filesToSend.isNotEmpty()) {
                         busyLabel = "Importing local files into sandbox..."
+                        AgentExecutionService.updateStatus(context, busyLabel)
                         repo.sendFounderMessage(
                             companyId = created.id,
                             text = text.ifBlank { "Inspect and process the attached local files." },
                             attachments = filesToSend,
                             onStatusUpdate = { status ->
                                 busyLabel = status
-                                refreshAll(created.id)
+                                AgentExecutionService.updateStatus(context, status)
+                                kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                                    refreshAll(created.id)
+                                }
                             },
                         )
                     }
-                    refreshAll(created.id)
+                    kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                        refreshAll(created.id)
+                    }
                 } else {
                     val bName = bots.firstOrNull { it.id == targetBotId }?.name ?: "CEO"
                     busyLabel = "$bName is reasoning in sandbox..."
+                    AgentExecutionService.updateStatus(context, busyLabel)
                     repo.sendFounderMessage(
                         companyId = companyId,
                         text = text,
@@ -321,14 +342,21 @@ fun FoundryMainScreen(repo: FoundryRepository) {
                         targetBotId = targetBotId,
                         onStatusUpdate = { status ->
                             busyLabel = status
-                            refreshAll(companyId)
+                            AgentExecutionService.updateStatus(context, status)
+                            kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                                refreshAll(companyId)
+                            }
                         },
                     )
-                    refreshAll(companyId)
+                    kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                        refreshAll(companyId)
+                    }
                 }
             } finally {
-                isBusy = false
-                activeRunJob = null
+                kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                    isBusy = false
+                    activeRunJob = null
+                }
             }
         }
     }

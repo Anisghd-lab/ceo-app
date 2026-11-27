@@ -1515,35 +1515,86 @@ fun SettingsDialog(
 
             Spacer(Modifier.height(10.dp))
 
-            // === 5. SECURITY & GLOBAL KILL SWITCH (COLLAPSIBLE) ===
+            // === 5. SECURITY & BACKGROUND PROTECTION (COLLAPSIBLE) ===
+            val ctx = androidx.compose.ui.platform.LocalContext.current
+            val powerMgr = remember(ctx) { ctx.getSystemService(android.content.Context.POWER_SERVICE) as android.os.PowerManager }
+            val batteryExempt = remember(ctx) { powerMgr.isIgnoringBatteryOptimizations(ctx.packageName) }
             CollapsibleSectionHeader(
-                title = "Safety & Kill Switch",
-                subtitle = "Emergency freeze for all bots & active CLI processes",
-                badgeText = if (killSwitch) "FROZEN" else "Armed",
-                badgeBg = if (killSwitch) FoundryColors.RedBg else Color.White,
-                badgeInk = if (killSwitch) FoundryColors.RedInk else FoundryColors.InkSecondary,
+                title = "Safety, Background & Kill Switch",
+                subtitle = "Background protection & emergency freeze",
+                badgeText = if (killSwitch) "FROZEN" else if (batteryExempt) "24/7 Ready" else "Armed",
+                badgeBg = if (killSwitch) FoundryColors.RedBg else if (batteryExempt) FoundryColors.GreenBg else Color.White,
+                badgeInk = if (killSwitch) FoundryColors.RedInk else if (batteryExempt) FoundryColors.GreenInk else FoundryColors.InkSecondary,
                 expanded = expandSafetySection,
                 onToggle = { expandSafetySection = !expandSafetySection },
             ) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(top = 8.dp)
-                        .clip(RoundedCornerShape(14.dp))
-                        .background(FoundryColors.RedBg)
-                        .padding(12.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
-                        Icon(Icons.Rounded.Warning, contentDescription = null, tint = FoundryColors.RedInk)
-                        Spacer(Modifier.width(8.dp))
-                        Column {
-                            Text("Global Kill Switch", fontWeight = FontWeight.Bold, color = FoundryColors.RedInk, fontSize = 13.5.sp)
-                            Text("Freeze all bots immediately", fontSize = 11.5.sp, color = FoundryColors.InkSecondary)
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(top = 8.dp)
+                            .clip(RoundedCornerShape(14.dp))
+                            .background(if (batteryExempt) FoundryColors.GreenBg else Color(0xFFFFFBEB))
+                            .border(1.dp, FoundryColors.Border, RoundedCornerShape(14.dp))
+                            .padding(12.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = if (batteryExempt) "Background Execution Unrestricted ✓" else "Protect Background Execution",
+                                fontWeight = FontWeight.SemiBold,
+                                color = if (batteryExempt) FoundryColors.GreenInk else FoundryColors.AmberInk,
+                                fontSize = 12.5.sp,
+                            )
+                            Text(
+                                text = if (batteryExempt) "Android won't kill active bots when locked or minimized."
+                                else "Allow CEO to ignore battery limits so long tasks never stop abruptly.",
+                                fontSize = 11.sp,
+                                color = FoundryColors.InkSecondary,
+                            )
+                        }
+                        if (!batteryExempt) {
+                            Spacer(Modifier.width(8.dp))
+                            Box(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(999.dp))
+                                    .background(FoundryColors.InkPrimary)
+                                    .clickable {
+                                        runCatching {
+                                            val intent = android.content.Intent(
+                                                android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                                                android.net.Uri.parse("package:${ctx.packageName}"),
+                                            )
+                                            ctx.startActivity(intent)
+                                        }
+                                    }
+                                    .padding(horizontal = 10.dp, vertical = 6.dp),
+                            ) {
+                                Text("Allow 24/7", color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+                            }
                         }
                     }
-                    Switch(checked = killSwitch, onCheckedChange = onToggleKillSwitch)
+
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(14.dp))
+                            .background(FoundryColors.RedBg)
+                            .padding(12.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
+                            Icon(Icons.Rounded.Warning, contentDescription = null, tint = FoundryColors.RedInk)
+                            Spacer(Modifier.width(8.dp))
+                            Column {
+                                Text("Global Kill Switch", fontWeight = FontWeight.Bold, color = FoundryColors.RedInk, fontSize = 13.5.sp)
+                                Text("Freeze all bots immediately", fontSize = 11.5.sp, color = FoundryColors.InkSecondary)
+                            }
+                        }
+                        Switch(checked = killSwitch, onCheckedChange = onToggleKillSwitch)
+                    }
                 }
             }
 

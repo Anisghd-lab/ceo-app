@@ -179,7 +179,49 @@ class AutonomousEngine(
         }
         val feed = runCatching { sandbox.readTextFile(companyId, "workspace/team_feed.md") }.getOrDefault("")
             .lines().takeLast(14).joinToString("\n")
-        return "SHARED ARTIFACTS CREATED SO FAR (ALL BOTS SEE THIS):\n$artLines\n\nSHARED TEAM ACTIVITY FEED:\n${feed.ifBlank { "none yet" }}"
+        val journal = runCatching { sandbox.readTextFile(companyId, "workspace/company_journal.md") }.getOrDefault("")
+            .lines().takeLast(16).joinToString("\n")
+        return "SHARED ARTIFACTS CREATED SO FAR (ALL BOTS SEE THIS):\n$artLines\n\nSHARED TEAM ACTIVITY FEED:\n${feed.ifBlank { "none yet" }}\n\nCOMPANY LONG-TERM MEMORY JOURNAL:\n${journal.ifBlank { "none yet" }}"
+    }
+
+    private fun syncCompanyNotionLedger(
+        comp: CompanyItem,
+        sectionTitle: String,
+        entryMarkdown: String,
+    ): String? {
+        val stamp = java.text.SimpleDateFormat("yyyy-MM-dd HH:mm", java.util.Locale.US).format(java.util.Date())
+        val formattedEntry = "\n## $stamp · $sectionTitle\n$entryMarkdown\n"
+        val prevJournal = runCatching { sandbox.readTextFile(comp.id, "workspace/company_journal.md") }.getOrDefault("")
+        val fullJournal = (prevJournal + formattedEntry).trimStart()
+        sandbox.writeTextFile(comp.id, "workspace/company_journal.md", fullJournal)
+
+        val exec = pluginExecutor ?: return null
+        val notionTok = pluginAuth?.getAccessToken("notion").orEmpty()
+        if (notionTok.isBlank()) return null
+
+        val pagePrefKey = "notion_page_${comp.id}"
+        val syncedLenKey = "notion_synced_len_${comp.id}"
+        val existingPageId = prefs.getString(pagePrefKey, "").orEmpty()
+        val syncedLen = prefs.getInt(syncedLenKey, 0).coerceAtMost(prevJournal.length)
+        val unsyncedContent = if (existingPageId.isBlank() && fullJournal.length > syncedLen) {
+            fullJournal.takeLast(3500)
+        } else {
+            formattedEntry
+        }
+
+        val res = exec.ensureAndAppendCompanyNotionPage(
+            companyName = comp.name,
+            objective = comp.description,
+            existingPageId = existingPageId,
+            sectionTitle = sectionTitle,
+            entryMarkdown = unsyncedContent,
+        ) ?: return null
+
+        prefs.edit()
+            .putString(pagePrefKey, res.first)
+            .putInt(syncedLenKey, fullJournal.length)
+            .apply()
+        return res.second
     }
 
     private fun harvestNativeCliArtifacts(companyId: String, botName: String, seenOutNames: MutableSet<String>): List<ArtifactItem> {
@@ -206,7 +248,8 @@ class AutonomousEngine(
         if (batch != null && batch.length() > 0) {
             for (i in 0 until minOf(batch.length(), 6)) {
                 val c = batch.optJSONObject(i) ?: continue
-                val t = c.optString("tool").ifBlank { continue }
+                val t = c.optString("tool")
+                if (t.isBlank()) continue
                 val a = c.optJSONObject("args") ?: JSONObject()
                 onStatusUpdate("${bot.name} running $t...")
                 val (obs, art) = executeAnyTool(comp, bot, t, a, onStatusUpdate)
@@ -764,6 +807,24 @@ class AutonomousEngine(
             ),
             rawPayloadJson = orgPayload.toString(),
         )
+
+        val initSummary = buildString {
+            append("- Objectif : ${proposal.missionStatement.ifBlank { description }}\n")
+            append("- Équipe : ${persistedBots.joinToString(", ") { "${it.name} (${it.role})" }}\n")
+            if (mandatesSummary.isNotBlank()) append("\n$mandatesSummary")
+        }
+        val notionUrl = syncCompanyNotionLedger(comp, "Création de l'entreprise & Mandats", initSummary)
+        if (!notionUrl.isNullOrBlank()) {
+            db.insertMessage(
+                ChatMessageItem(
+                    "msg_${UUID.randomUUID().toString().take(10)}",
+                    cid,
+                    "bot",
+                    botName = "CEO",
+                    content = "📒 Page Notion dédiée créée pour '${proposal.name}' (suivi & mémoire long terme) : $notionUrl",
+                )
+            )
+        }
 
         comp.copy(bots = persistedBots)
     }
@@ -1574,6 +1635,25 @@ class AutonomousEngine(
                 "mission",
                 "Mission '$title' built by ${producerBot.name}; QA by ${qaBot.name}: $qaScore/100 ($qaReport)",
             )
+            val ledgerEntry = buildString {
+                append("- Mission : **$title** ($goal)\n")
+                append("- Producteur : ${producerBot.name} · Audit QA (${qaBot.name}) : $qaScore/100 ($qaReport)\n")
+                if (createdArtifacts.isNotEmpty()) {
+                    append("- Artefacts : ${createdArtifacts.joinToString(", ") { "${it.filename} (${it.sizeBytes}B)" }}\n")
+                }
+            }
+            val notionUrl = syncCompanyNotionLedger(comp, "Mission : $title (QA $qaScore/100)", ledgerEntry)
+            if (!notionUrl.isNullOrBlank()) {
+                db.insertMessage(
+                    ChatMessageItem(
+                        "msg_${UUID.randomUUID().toString().take(10)}",
+                        comp.id,
+                        "bot",
+                        botName = "CEO",
+                        content = "📒 Mémoire Notion mise à jour pour '${comp.name}' : $notionUrl",
+                    )
+                )
+            }
 
             // Step 4: CEO opens Human Approval Gate + Android Notification
             db.updateMissionStatus(missionId, "PENDING_APPROVAL", qaScore)

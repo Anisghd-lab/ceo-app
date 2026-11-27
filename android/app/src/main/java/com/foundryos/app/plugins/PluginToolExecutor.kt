@@ -38,13 +38,47 @@ class PluginToolExecutor(
         .followRedirects(true)
         .build()
 
-    // Test hook (empty in production) so unit tests can point plugin REST calls at MockWebServer
+    // Test hooks (unused in production) so unit tests can mock REST & WebView reads deterministically
     internal var apiBaseOverrides: MutableMap<String, String> = mutableMapOf()
+    internal var sessionReaderForTest: (suspend (String) -> WebViewReadResult)? = null
+    private val webViewReader by lazy { BrowserSessionReader(context.applicationContext) }
 
     private fun enc(s: String): String = URLEncoder.encode(s, "UTF-8")
 
     private fun baseUrl(key: String, defaultBase: String): String =
         (apiBaseOverrides[key] ?: defaultBase).trimEnd('/')
+
+    private fun collectCookiesForUrl(targetUrl: String): String {
+        return runCatching {
+            val cm = CookieManager.getInstance()
+            val u = java.net.URI(targetUrl)
+            val host = u.host.orEmpty()
+            val scheme = u.scheme ?: "https"
+            val candidates = mutableSetOf(targetUrl)
+            if (host.isNotBlank()) {
+                candidates.add("$scheme://$host/")
+                val parts = host.split(".")
+                if (parts.size >= 2) {
+                    val apex = parts.takeLast(2).joinToString(".")
+                    candidates.add("$scheme://$apex/")
+                    candidates.add("$scheme://www.$apex/")
+                }
+            }
+            val merged = linkedMapOf<String, String>()
+            for (cand in candidates) {
+                val raw = cm.getCookie(cand).orEmpty()
+                for (pair in raw.split(";")) {
+                    val eq = pair.indexOf('=')
+                    if (eq > 0) {
+                        val k = pair.substring(0, eq).trim()
+                        val v = pair.substring(eq + 1).trim()
+                        if (k.isNotBlank()) merged[k] = v
+                    }
+                }
+            }
+            merged.entries.joinToString("; ") { "${it.key}=${it.value}" }
+        }.getOrDefault("")
+    }
 
     fun activeToolsSummaryForPrompt(): String {
         val statuses = auth.getPluginStatuses()
@@ -106,6 +140,7 @@ class PluginToolExecutor(
                 "notion_search" -> execNotionSearch(args.optString("query"))
                 "notion_read_page" -> execNotionReadPage(args.optString("page_id"))
                 "notion_create_page" -> execNotionCreatePage(args)
+                "notion_append_blocks" -> execNotionAppendBlocks(args)
                 "slack_list_channels" -> execSlackListChannels()
                 "slack_read_channel" -> execSlackReadChannel(args)
                 "slack_post_message" -> execSlackPostMessage(args)
@@ -262,31 +297,94 @@ class PluginToolExecutor(
         }
     }
 
-    private fun execBrowserReadUrl(url: String): PluginToolResult {
+    private suspend fun readViaWebViewSession(url: String): WebViewReadResult {
+        sessionReaderForTest?.let { return it(url) }
+        return webViewReader.readAuthenticatedPage(url)
+    }
+
+    private suspend fun execBrowserReadUrl(url: String): PluginToolResult {
         if (!url.startsWith("http")) return PluginToolResult(false, "Invalid URL: $url")
-        val cookies = runCatching { CookieManager.getInstance().getCookie(url).orEmpty() }.getOrDefault("")
+        val cookies = collectCookiesForUrl(url)
+        val origin = runCatching {
+            val u = java.net.URI(url)
+            "${u.scheme ?: "https"}://${u.host}"
+        }.getOrDefault(url)
+
         val reqBuilder = Request.Builder()
             .url(url)
             .header("User-Agent", "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 Chrome/131.0.0.0 Mobile Safari/537.36")
+            .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+            .header("Accept-Language", "fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7")
+            .header("Referer", "$origin/")
         if (cookies.isNotBlank()) reqBuilder.header("Cookie", cookies)
 
-        return http.newCall(reqBuilder.get().build()).execute().use { resp ->
-            val body = resp.body?.string().orEmpty()
-            val title = Regex("""<title[^>]*>(.*?)</title>""", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL))
-                .find(body)?.groupValues?.get(1)?.let { stripHtml(it) }.orEmpty()
-            val text = stripHtml(body).take(5500)
-            PluginToolResult(
-                resp.isSuccessful,
-                JSONObject()
-                    .put("status", resp.code)
-                    .put("url", url)
-                    .put("title", title)
-                    .put("authenticated_cookies_used", cookies.isNotBlank())
-                    .put("text", text)
-                    .toString(),
-            )
+        val (httpCode, okHttpOk, rawTitle, rawText) = runCatching {
+            http.newCall(reqBuilder.get().build()).execute().use { resp ->
+                val body = resp.body?.string().orEmpty()
+                val title = Regex("""<title[^>]*>(.*?)</title>""", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL))
+                    .find(body)?.groupValues?.get(1)?.let { stripHtml(it) }.orEmpty()
+                val text = stripHtml(body).take(5500)
+                QuadResult(resp.code, resp.isSuccessful, title, text)
+            }
+        }.getOrElse {
+            QuadResult(0, false, "", it.message.orEmpty())
         }
+
+        // If OkHttp hits 404/403/401 OR an empty JS/SPA shell on an authenticated session,
+        // execute cleanly inside the real WebView engine sharing CookieManager & DOM Storage!
+        val needsWebViewRecovery = !okHttpOk || httpCode == 404 || httpCode == 403 || httpCode == 401 || rawText.length < 180
+        if (needsWebViewRecovery) {
+            val wvDirect = readViaWebViewSession(url)
+            if (wvDirect.ok) {
+                return PluginToolResult(
+                    true,
+                    JSONObject()
+                        .put("status", 200)
+                        .put("mode", "webview_session")
+                        .put("url", wvDirect.finalUrl)
+                        .put("title", wvDirect.title)
+                        .put("authenticated_cookies_used", true)
+                        .put("text", wvDirect.text)
+                        .put("links", wvDirect.linksJson)
+                        .toString(),
+                )
+            }
+            // If deep path returned 404 (e.g. site moved /projects -> /dashboard), auto-recover via authenticated root origin!
+            if (wvDirect.httpStatusHint == 404 || httpCode == 404) {
+                if (origin != url && origin.startsWith("http")) {
+                    val wvRoot = readViaWebViewSession(origin)
+                    if (wvRoot.ok) {
+                        return PluginToolResult(
+                            true,
+                            JSONObject()
+                                .put("status", 200)
+                                .put("mode", "webview_origin_recovery_from_404")
+                                .put("requested_url", url)
+                                .put("resolved_url", wvRoot.finalUrl)
+                                .put("title", wvRoot.title)
+                                .put("authenticated_cookies_used", true)
+                                .put("text", wvRoot.text)
+                                .put("links", wvRoot.linksJson)
+                                .toString(),
+                        )
+                    }
+                }
+            }
+        }
+
+        return PluginToolResult(
+            okHttpOk,
+            JSONObject()
+                .put("status", httpCode)
+                .put("url", url)
+                .put("title", rawTitle)
+                .put("authenticated_cookies_used", cookies.isNotBlank())
+                .put("text", rawText)
+                .toString(),
+        )
     }
+
+    private data class QuadResult(val code: Int, val ok: Boolean, val title: String, val text: String)
 
     private fun execProductDesignPrototype(companyId: String, args: JSONObject): PluginToolResult {
         val rawFn = args.optString("filename").ifBlank { "ui_prototype.html" }
@@ -307,8 +405,26 @@ class PluginToolExecutor(
         return tok.takeIf { it.isNotBlank() }
     }
 
-    private fun execGitHubRepos(): PluginToolResult {
-        val tok = requireToken("github", "GitHub") ?: return PluginToolResult(false, "GitHub not connected. Connect GitHub in Settings -> Plugins.")
+    private suspend fun fallbackToWebSessionIfAuthenticated(
+        pluginId: String,
+        dashboardUrl: String,
+        missingMsg: String,
+    ): PluginToolResult {
+        val def = PluginRegistry.ALL.firstOrNull { it.id == pluginId }
+        val webOk = def != null && auth.hasValidBrowserCookie(def)
+        return if (webOk) {
+            execBrowserReadUrl(dashboardUrl)
+        } else {
+            PluginToolResult(false, missingMsg)
+        }
+    }
+
+    private suspend fun execGitHubRepos(): PluginToolResult {
+        val tok = requireToken("github", "GitHub") ?: return fallbackToWebSessionIfAuthenticated(
+            "github",
+            "https://github.com/dashboard",
+            "GitHub not connected. Connect GitHub in Settings -> Plugins.",
+        )
         val req = Request.Builder().url("${baseUrl("github", "https://api.github.com")}/user/repos?sort=updated&per_page=15")
             .header("Authorization", "Bearer $tok").header("Accept", "application/vnd.github+json").get().build()
         return http.newCall(req).execute().use { resp ->
@@ -350,8 +466,12 @@ class PluginToolExecutor(
         }
     }
 
-    private fun execNotionSearch(query: String): PluginToolResult {
-        val tok = requireToken("notion", "Notion") ?: return PluginToolResult(false, "Notion not connected. Connect Notion in Settings -> Plugins.")
+    private suspend fun execNotionSearch(query: String): PluginToolResult {
+        val tok = requireToken("notion", "Notion") ?: return fallbackToWebSessionIfAuthenticated(
+            "notion",
+            "https://www.notion.so",
+            "Notion not connected. Connect Notion in Settings -> Plugins.",
+        )
         val body = JSONObject().put("query", query).put("page_size", 10)
         val req = Request.Builder().url("${baseUrl("notion", "https://api.notion.com")}/v1/search")
             .header("Authorization", "Bearer $tok").header("Notion-Version", "2022-06-28")
@@ -372,18 +492,122 @@ class PluginToolExecutor(
 
     private fun execNotionCreatePage(args: JSONObject): PluginToolResult {
         val tok = requireToken("notion", "Notion") ?: return PluginToolResult(false, "Notion not connected.")
-        val parentId = args.optString("parent_id")
+        val base = baseUrl("notion", "https://api.notion.com")
+        val parentId = args.optString("parent_id").ifBlank { findDefaultNotionParentId(tok, base).orEmpty() }
+        if (parentId.isBlank()) return PluginToolResult(false, "Missing parent_id and no accessible Notion workspace page found.")
         val title = args.optString("title").ifBlank { "CEO Brief" }
         val text = args.optString("markdown").ifBlank { args.optString("content") }
         val payload = JSONObject()
             .put("parent", JSONObject().put("page_id", parentId))
             .put("properties", JSONObject().put("title", JSONObject().put("title", JSONArray().put(JSONObject().put("text", JSONObject().put("content", title))))))
-            .put("children", JSONArray().put(JSONObject().put("object", "block").put("type", "paragraph").put("paragraph", JSONObject().put("rich_text", JSONArray().put(JSONObject().put("type", "text").put("text", JSONObject().put("content", text.take(1900))))))))
-        val req = Request.Builder().url("https://api.notion.com/v1/pages")
+            .put("children", markdownToNotionBlocks(text))
+        val req = Request.Builder().url("$base/v1/pages")
             .header("Authorization", "Bearer $tok").header("Notion-Version", "2022-06-28")
             .post(payload.toString().toRequestBody(jsonMedia)).build()
         return http.newCall(req).execute().use { resp ->
             PluginToolResult(resp.isSuccessful, resp.body?.string().orEmpty().take(2000))
+        }
+    }
+
+    private fun execNotionAppendBlocks(args: JSONObject): PluginToolResult {
+        val tok = requireToken("notion", "Notion") ?: return PluginToolResult(false, "Notion not connected.")
+        val pageId = args.optString("page_id").ifBlank { return PluginToolResult(false, "Missing page_id") }
+        val text = args.optString("markdown").ifBlank { args.optString("content") }
+        val base = baseUrl("notion", "https://api.notion.com")
+        val payload = JSONObject().put("children", markdownToNotionBlocks(text))
+        val req = Request.Builder().url("$base/v1/blocks/$pageId/children")
+            .header("Authorization", "Bearer $tok").header("Notion-Version", "2022-06-28")
+            .patch(payload.toString().toRequestBody(jsonMedia)).build()
+        return http.newCall(req).execute().use { resp ->
+            PluginToolResult(resp.isSuccessful, resp.body?.string().orEmpty().take(2000))
+        }
+    }
+
+    private fun findDefaultNotionParentId(tok: String, base: String): String? {
+        return runCatching {
+            val body = JSONObject()
+                .put("filter", JSONObject().put("value", "page").put("property", "object"))
+                .put("page_size", 5)
+            val req = Request.Builder().url("$base/v1/search")
+                .header("Authorization", "Bearer $tok").header("Notion-Version", "2022-06-28")
+                .post(body.toString().toRequestBody(jsonMedia)).build()
+            http.newCall(req).execute().use { resp ->
+                if (!resp.isSuccessful) return@runCatching null
+                val arr = JSONObject(resp.body?.string().orEmpty()).optJSONArray("results") ?: return@runCatching null
+                if (arr.length() > 0) arr.getJSONObject(0).optString("id").ifBlank { null } else null
+            }
+        }.getOrNull()
+    }
+
+    private fun markdownToNotionBlocks(markdown: String): JSONArray {
+        val blocks = JSONArray()
+        val clean = markdown.trim().ifBlank { "Updated by CEO" }
+        val chunks = clean.chunked(1850).take(12)
+        for (chunk in chunks) {
+            blocks.put(
+                JSONObject()
+                    .put("object", "block")
+                    .put("type", "paragraph")
+                    .put(
+                        "paragraph",
+                        JSONObject().put(
+                            "rich_text",
+                            JSONArray().put(
+                                JSONObject().put("type", "text").put("text", JSONObject().put("content", chunk))
+                            )
+                        )
+                    )
+            )
+        }
+        return blocks
+    }
+
+    /**
+     * Ensures a dedicated Notion tracking & memory page exists for `companyName`
+     * and appends a structured mission/progress update block cleanly.
+     */
+    fun ensureAndAppendCompanyNotionPage(
+        companyName: String,
+        objective: String,
+        existingPageId: String,
+        sectionTitle: String,
+        entryMarkdown: String,
+    ): Pair<String, String>? {
+        val tok = requireToken("notion", "Notion") ?: return null
+        val base = baseUrl("notion", "https://api.notion.com")
+
+        if (existingPageId.isNotBlank()) {
+            val payload = JSONObject().put("children", markdownToNotionBlocks("[$sectionTitle]\n$entryMarkdown"))
+            val req = Request.Builder().url("$base/v1/blocks/$existingPageId/children")
+                .header("Authorization", "Bearer $tok").header("Notion-Version", "2022-06-28")
+                .patch(payload.toString().toRequestBody(jsonMedia)).build()
+            http.newCall(req).execute().use { resp ->
+                if (resp.isSuccessful) {
+                    val slugId = existingPageId.replace("-", "")
+                    return existingPageId to "https://www.notion.so/$slugId"
+                }
+            }
+        }
+
+        val parentId = findDefaultNotionParentId(tok, base) ?: return null
+        val initContent = buildString {
+            append("Entreprise : $companyName\n")
+            append("Objectif : $objective\n\n")
+            append("[$sectionTitle]\n$entryMarkdown")
+        }
+        val payload = JSONObject()
+            .put("parent", JSONObject().put("page_id", parentId))
+            .put("properties", JSONObject().put("title", JSONObject().put("title", JSONArray().put(JSONObject().put("text", JSONObject().put("content", "[CEO] $companyName — Suivi & Mémoire"))))))
+            .put("children", markdownToNotionBlocks(initContent))
+        val req = Request.Builder().url("$base/v1/pages")
+            .header("Authorization", "Bearer $tok").header("Notion-Version", "2022-06-28")
+            .post(payload.toString().toRequestBody(jsonMedia)).build()
+        return http.newCall(req).execute().use { resp ->
+            if (!resp.isSuccessful) return null
+            val obj = runCatching { JSONObject(resp.body?.string().orEmpty()) }.getOrNull() ?: return null
+            val pid = obj.optString("id").ifBlank { return null }
+            val url = obj.optString("url").ifBlank { "https://www.notion.so/${pid.replace("-", "")}" }
+            pid to url
         }
     }
 
@@ -492,8 +716,12 @@ class PluginToolExecutor(
         }
     }
 
-    private fun execFigmaGet(path: String): PluginToolResult {
-        val tok = requireToken("figma", "Figma") ?: return PluginToolResult(false, "Figma not connected. Connect Figma in Settings -> Plugins.")
+    private suspend fun execFigmaGet(path: String): PluginToolResult {
+        val tok = requireToken("figma", "Figma") ?: return fallbackToWebSessionIfAuthenticated(
+            "figma",
+            "https://www.figma.com/files/recent",
+            "Figma not connected. Connect Figma in Settings -> Plugins.",
+        )
         val b = Request.Builder().url("https://api.figma.com/v1$path")
         if (tok.startsWith("figd_")) b.header("X-Figma-Token", tok) else b.header("Authorization", "Bearer $tok")
         return http.newCall(b.get().build()).execute().use { resp ->
@@ -501,8 +729,12 @@ class PluginToolExecutor(
         }
     }
 
-    private fun execCanvaDesigns(query: String): PluginToolResult {
-        val tok = requireToken("canva", "Canva") ?: return PluginToolResult(false, "Canva not connected. Connect Canva in Settings -> Plugins.")
+    private suspend fun execCanvaDesigns(query: String): PluginToolResult {
+        val tok = requireToken("canva", "Canva") ?: return fallbackToWebSessionIfAuthenticated(
+            "canva",
+            "https://www.canva.com",
+            "Canva not connected. Connect Canva in Settings -> Plugins.",
+        )
         val q = if (query.isBlank()) "" else "?query=${enc(query)}"
         val req = Request.Builder().url("https://api.canva.com/rest/v1/designs$q")
             .header("Authorization", "Bearer $tok").get().build()

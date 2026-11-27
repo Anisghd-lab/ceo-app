@@ -29,6 +29,15 @@
 - [x] **Backend Python (`backend/`)** : 5/5 tests `pytest` verts.
 - [x] **FreeLLMAPI (`freellmapi`) + Pool Modèles Gratuits (`v0.7.0`)** :
   - Fournisseur natif `freellmapi` avec URL de passerelle configurable (défaut `http://127.0.0.1:3001`), jeton Bearer optionnel en local, filtre automatique sur `available == true`, badge `FREE`, épingle `auto` / `fusion` et activation automatique du routeur gratuit.
+- [x] **Exécution Arrière-Plan Permanente & Continuité (`v0.8.0`)** :
+  - `AgentExecutionService.kt` : Foreground Service `dataSync` avec `PARTIAL_WAKE_LOCK`, notification persistante et bouton `Stop`, protégeant l'exécution des bots lorsque l'application passe en arrière-plan ou que l'écran est verrouillé.
+  - Bouton **Allow 24/7 / Exempt Battery** dans `Sheets.kt` (`ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`) + rafraîchissement automatique du chat pendant l'exécution en arrière-plan (`MainApp.kt`).
+- [x] **Mémoire Long-Terme Multi-Semaines & Page Notion Dédiée par Entreprise (`v0.8.0`)** :
+  - Chaque entreprise maintient son journal cumulatif `workspace/company_journal.md` partagé entre toutes les missions (aujourd'hui, la semaine suivante, etc.).
+  - Dès que Notion est connecté, `AutonomousEngine.syncCompanyNotionLedger` crée automatiquement une page Notion dédiée **`[CEO] <Entreprise> — Suivi & Mémoire`** (`POST /v1/pages`) puis y ajoute en continu chaque nouvelle mission, score QA et livrables (`PATCH /v1/blocks/{id}/children`), avec rattrapage automatique de l'historique si Notion est connecté après coup.
+- [x] **Correction Erreurs 404 & Sessions Cookies In-App Browser (`v0.8.0`)** :
+  - `BrowserSessionReader.kt` : lecteur WebView hors-écran partageant exactement `CookieManager`, DOM Storage et rendu JS/SPA du navigateur interne CEO.
+  - `PluginToolExecutor.kt` : collecte multi-domaines des cookies (`apex` + `www` + `sub`), bascule automatique sur WebView sur HTTP `404`/`403`/`401` ou HTML vide, récupération sur l'origine du site authentifié si une sous-route renvoie `404`, et repli transparent vers les sessions cookies pour GitHub/Notion/Figma/Canva.
 - [x] **Watchdog Anti-Blocage, Interrogation CEO & Reprise (`v0.7.1`)** :
   - `AgyRuntimeManager.runPrompt` inclut un watchdog processus (`120s`) pour détruire tout processus `agy` bloqué.
   - `AutonomousEngine.runFullMission` exécute chaque bot sous `botStepTimeoutMs` (`75s`), déclenche automatiquement **`ceoInterrogateBlockedBot`** (`[CEO ⇄ Bot]`) en cas de timeout/blocage/arrêt et passe au bot suivant ou reprend exactement au bot N+1 sur commande **`continue` / `reprends` / `suivant`** grâce au checkpoint persistant (`MissionCheckpoint`).

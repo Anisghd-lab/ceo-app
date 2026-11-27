@@ -7,9 +7,9 @@ on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: 'Release tag (e.g. v0.7.1)'
+        description: 'Release tag (e.g. v0.8.0)'
         required: false
-        default: 'v0.7.1'
+        default: 'v0.8.0'
 
 permissions:
   contents: write
@@ -87,7 +87,7 @@ jobs:
             if [[ "${{ github.ref }}" == refs/tags/* ]]; then
               TAG="${{ github.ref_name }}"
             else
-              TAG="v0.7.1"
+              TAG="v0.8.0"
             fi
           fi
 

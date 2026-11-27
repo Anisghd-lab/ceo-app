@@ -6,6 +6,8 @@ import com.foundryos.app.engine.OnDeviceSandbox
 import com.foundryos.app.plugins.PluginAuthManager
 import com.foundryos.app.plugins.PluginRegistry
 import com.foundryos.app.plugins.PluginToolExecutor
+import com.foundryos.app.plugins.WebViewReadResult
+import com.foundryos.app.service.AgentExecutionService
 import kotlinx.coroutines.test.runTest
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
@@ -179,5 +181,56 @@ class PluginSystemTest {
         assertEquals("POST", req.method)
         assertEquals("/cmt_77/replies", req.path)
         assertEquals("Bearer ig_tok_test", req.getHeader("Authorization"))
+    }
+
+    @Test
+    fun browserReadUrl_recoversFrom404ViaWebViewSessionAndOriginDashboard() = runTest {
+        val base = server.url("").toString().trimEnd('/')
+        server.enqueue(MockResponse().setResponseCode(404).setBody("<html><title>404 Not Found</title></html>"))
+
+        val visited = mutableListOf<String>()
+        executor.sessionReaderForTest = { requested ->
+            visited.add(requested)
+            if (requested.endsWith("/projects")) {
+                WebViewReadResult(
+                    ok = false,
+                    finalUrl = requested,
+                    title = "404 Not Found",
+                    text = "",
+                    httpStatusHint = 404,
+                )
+            } else {
+                WebViewReadResult(
+                    ok = true,
+                    finalUrl = "$base/dashboard",
+                    title = "Kittl Dashboard",
+                    text = "Welcome Creator — My Projects & Templates loaded with browser session",
+                    linksJson = """[{"text":"Templates","href":"$base/templates"}]""",
+                    httpStatusHint = 200,
+                )
+            }
+        }
+
+        val res = executor.execute(
+            companyId = "comp_browser_404",
+            toolName = "browser_read_url",
+            args = JSONObject().put("url", "$base/projects"),
+        )
+
+        assertTrue("404 deep path must recover cleanly via WebView origin dashboard: ${res.output}", res.ok)
+        val out = JSONObject(res.output)
+        assertEquals("webview_origin_recovery_from_404", out.getString("mode"))
+        assertTrue(out.getBoolean("authenticated_cookies_used"))
+        assertTrue(out.getString("text").contains("My Projects"))
+        assertTrue("Expected WebView recovery visit to $base/projects and origin $base", visited.size >= 2)
+    }
+
+    @Test
+    fun agentExecutionService_ensureChannelAndEnqueueWorksHeadless() {
+        AgentExecutionService.ensureChannel(context)
+        AgentExecutionService.enqueueTask(context, "Background verification task") {
+            // Headless Robolectric dispatch should never throw SecurityException or crash
+        }
+        assertTrue(true)
     }
 }

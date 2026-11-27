@@ -561,11 +561,11 @@ class AgyRuntimeManager(private val context: Context) {
             try {
                 val proc = pb.start()
                 activeRunProcess = proc
-                @Volatile var timedOut = false
+                val timedOut = java.util.concurrent.atomic.AtomicBoolean(false)
                 val watchdogJob = scope.launch {
                     delay(timeoutMs)
                     if (activeRunProcess === proc && proc.isAlive) {
-                        timedOut = true
+                        timedOut.set(true)
                         addLog("Watchdog killed stalled agy process after ${timeoutMs / 1000}s")
                         runCatching { proc.destroyForcibly() }
                     }
@@ -626,7 +626,7 @@ class AgyRuntimeManager(private val context: Context) {
                     .trim()
                 val errText = errBuffer.toString().trim()
 
-                if (timedOut) {
+                if (timedOut.get()) {
                     false to "agy timed out after ${timeoutMs / 1000}s"
                 } else if (resultStatus.equals("ERROR", ignoreCase = true)) {
                     false to resultError.ifBlank { answer }.ifBlank { errText }.ifBlank { "Antigravity CLI error" }

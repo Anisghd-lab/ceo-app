@@ -571,4 +571,67 @@ class AutonomousBotsEndToEndTest {
         assertTrue("Team feed must contain sync_map.svg for other bots", feed.contains("sync_map.svg"))
         assertTrue("Final CEO answer saved", db.listMessages(cid).any { it.content.contains("partagés") })
     }
+
+    @Test
+    fun companyNotionPage_createsOnDeployAndAppendsAcrossWeeks() = runTest {
+        auth.saveToken("notion", "secret_notion_123", accountLabel = "Notion Pro")
+        pluginExec.apiBaseOverrides["notion"] = pluginServer.url("").toString().trimEnd('/')
+
+        // 1) Propose & Deploy company -> auto-creates dedicated Notion page
+        aiServer.enqueue(
+            openAiWrap(
+                """{"company_name":"AcademyFlow","mission_statement":"Formations IA en continu","strategy_summary":"Équipe prête.","recommended_connectors":["notion","browser"],"bots":[
+                    {"name":"CEO","role":"CEO","tagline":"Leads","system_prompt":"Lead AcademyFlow","allowed_tools":["notion_search"],"is_qa":false},
+                    {"name":"Producer","role":"Course Builder","tagline":"Builds PDFs","system_prompt":"Create modules","allowed_tools":["create_pdf"],"is_qa":false},
+                    {"name":"Memory","role":"Memory Sync","tagline":"Logs history","system_prompt":"Track journal","allowed_tools":["company_memory"],"is_qa":false},
+                    {"name":"Quality Auditor","role":"QA","tagline":"Checks output","system_prompt":"Audit","allowed_tools":["qa_verify"],"is_qa":true}
+                ]}"""
+            )
+        )
+        pluginServer.enqueue(MockResponse().setResponseCode(200).setBody("""{"results":[{"id":"root_ws_page_1"}]}"""))
+        pluginServer.enqueue(MockResponse().setResponseCode(200).setBody("""{"id":"notion_cmp_page_99","url":"https://www.notion.so/notioncmppage99"}"""))
+
+        val prop = engine.proposeCompany("Entreprise de formations continues")
+        val comp = engine.deployCompany("Entreprise de formations continues", prop)
+
+        val deployMsgs = db.listMessages(comp.id).map { it.content }
+        assertTrue("CEO must post created dedicated Notion URL on deploy", deployMsgs.any { it.contains("Page Notion dédiée créée") && it.contains("notion.so") })
+
+        // 2) Week 1 task -> creates module 1 and appends to the same Notion page
+        aiServer.enqueue(openAiWrap("""{"action":"run_mission","title":"Module 1 IA","goal":"Créer le module 1 PDF","ceo_reply":"Semaine 1 lancée."}"""))
+        aiServer.enqueue(openAiWrap("""{"action":"tool","tool":"create_pdf","args":{"filename":"module_1.pdf","title":"Module 1","subtitle":"Semaine 1","sections":[{"heading":"Intro","body":"Contenu semaine 1 complet."}]}}"""))
+        aiServer.enqueue(openAiWrap("""{"action":"final","summary":"Module 1 prêt.","primary_rel_path":"output/module_1.pdf"}"""))
+        aiServer.enqueue(openAiWrap("""{"passed":true,"score":92,"report":"Module 1 validé."}"""))
+        pluginServer.enqueue(MockResponse().setResponseCode(200).setBody("""{"results":[]}"""))
+
+        engine.handleFounderMessage(comp.id, "Tâche d'aujourd'hui : crée le module 1")
+
+        // 3) Next week task on the exact same company -> appends Week 2 to existing Notion page & cumulative journal
+        aiServer.enqueue(openAiWrap("""{"action":"run_mission","title":"Module 2 Avancé","goal":"Ajouter le module 2 la semaine suivante","ceo_reply":"Semaine 2 lancée sur le même dossier."}"""))
+        aiServer.enqueue(openAiWrap("""{"action":"tool","tool":"create_pdf","args":{"filename":"module_2.pdf","title":"Module 2","subtitle":"Semaine 2","sections":[{"heading":"Pratique","body":"Contenu semaine 2 avec historique."}]}}"""))
+        aiServer.enqueue(openAiWrap("""{"action":"final","summary":"Module 2 prêt.","primary_rel_path":"output/module_2.pdf"}"""))
+        aiServer.enqueue(openAiWrap("""{"passed":true,"score":96,"report":"Module 2 validé."}"""))
+        pluginServer.enqueue(MockResponse().setResponseCode(200).setBody("""{"results":[]}"""))
+
+        engine.handleFounderMessage(comp.id, "Tâche semaine prochaine : ajoute le module 2")
+
+        val journal = sandbox.readTextFile(comp.id, "workspace/company_journal.md")
+        assertTrue("Company journal must retain Week 1", journal.contains("Module 1 IA"))
+        assertTrue("Company journal must append Week 2", journal.contains("Module 2 Avancé"))
+
+        val searchReq = pluginServer.takeRequest()
+        assertEquals("/v1/search", searchReq.path)
+        val createReq = pluginServer.takeRequest()
+        assertEquals("POST", createReq.method)
+        assertEquals("/v1/pages", createReq.path)
+        assertTrue(createReq.body.readUtf8().contains("[CEO] AcademyFlow"))
+
+        val patchWeek1 = pluginServer.takeRequest()
+        assertEquals("PATCH", patchWeek1.method)
+        assertEquals("/v1/blocks/notion_cmp_page_99/children", patchWeek1.path)
+
+        val patchWeek2 = pluginServer.takeRequest()
+        assertEquals("PATCH", patchWeek2.method)
+        assertEquals("/v1/blocks/notion_cmp_page_99/children", patchWeek2.path)
+    }
 }

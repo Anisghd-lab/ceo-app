@@ -22,6 +22,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -62,6 +63,24 @@ class AutonomousEngine(
     var runCancelled: Boolean = false
         private set
 
+    internal var botStepTimeoutMs: Long = 75_000L
+
+    @Volatile
+    private var currentMissionCompanyId: String? = null
+
+    @Volatile
+    private var currentRunningBotId: String? = null
+
+    data class MissionCheckpoint(
+        val missionId: String,
+        val title: String,
+        val goal: String,
+        val scopedSpec: String,
+        val completedBotIds: MutableSet<String> = mutableSetOf(),
+        val interruptedBotId: String? = null,
+        val botMandates: Map<String, String> = emptyMap(),
+    )
+
     var killSwitch: Boolean
         get() = prefs.getBoolean("kill_switch", false)
         set(value) {
@@ -78,6 +97,14 @@ class AutonomousEngine(
     fun stopAllExecution() {
         runCancelled = true
         agy?.stopActiveRun()
+        val activeCid = currentMissionCompanyId
+        val activeBotId = currentRunningBotId
+        if (activeCid != null && activeBotId != null) {
+            val ckpt = loadMissionCheckpoint(activeCid)
+            if (ckpt != null) {
+                saveMissionCheckpoint(activeCid, ckpt.copy(interruptedBotId = activeBotId))
+            }
+        }
         val updated = _botTelemetry.value.mapValues { (_, act) ->
             if (act.status == "working") act.copy(status = "stopped", currentTask = "Stopped by Founder", updatedAtMs = System.currentTimeMillis()) else act
         }
@@ -91,6 +118,162 @@ class AutonomousEngine(
                 lastThinkingText = cur.thinkingText.ifBlank { cur.lastThinkingText },
             )
         }
+    }
+
+    private fun saveMissionCheckpoint(companyId: String, ckpt: MissionCheckpoint) {
+        val mandatesJson = JSONObject()
+        ckpt.botMandates.forEach { (k, v) -> mandatesJson.put(k, v) }
+        val obj = JSONObject()
+            .put("mission_id", ckpt.missionId)
+            .put("title", ckpt.title)
+            .put("goal", ckpt.goal)
+            .put("scoped_spec", ckpt.scopedSpec.take(12_000))
+            .put("completed_bot_ids", JSONArray(ckpt.completedBotIds.toList()))
+            .put("interrupted_bot_id", ckpt.interruptedBotId ?: "")
+            .put("bot_mandates", mandatesJson)
+        prefs.edit().putString("mission_ckpt_$companyId", obj.toString()).apply()
+    }
+
+    private fun loadMissionCheckpoint(companyId: String): MissionCheckpoint? {
+        val raw = prefs.getString("mission_ckpt_$companyId", null) ?: return null
+        return runCatching {
+            val obj = JSONObject(raw)
+            val compArr = obj.optJSONArray("completed_bot_ids") ?: JSONArray()
+            val completed = (0 until compArr.length()).map { compArr.optString(it) }.filter { it.isNotBlank() }.toMutableSet()
+            val mObj = obj.optJSONObject("bot_mandates") ?: JSONObject()
+            val mandates = buildMap<String, String> {
+                val keys = mObj.keys()
+                while (keys.hasNext()) {
+                    val k = keys.next()
+                    put(k, mObj.optString(k))
+                }
+            }
+            MissionCheckpoint(
+                missionId = obj.optString("mission_id"),
+                title = obj.optString("title"),
+                goal = obj.optString("goal"),
+                scopedSpec = obj.optString("scoped_spec"),
+                completedBotIds = completed,
+                interruptedBotId = obj.optString("interrupted_bot_id").ifBlank { null },
+                botMandates = mandates,
+            )
+        }.getOrNull()
+    }
+
+    private fun clearMissionCheckpoint(companyId: String) {
+        prefs.edit().remove("mission_ckpt_$companyId").apply()
+    }
+
+    private fun appendTeamFeed(companyId: String, actorName: String, summaryLine: String) {
+        val cleanLine = "- [$actorName] ${summaryLine.replace("\n", " ").take(260)}"
+        val existing = runCatching { sandbox.readTextFile(companyId, "workspace/team_feed.md") }.getOrDefault("# Shared Team Feed\n")
+        val updated = "$existing\n$cleanLine".takeLast(14_000)
+        runCatching { sandbox.writeTextFile(companyId, "workspace/team_feed.md", updated) }
+        db.rememberNote("mem_${UUID.randomUUID().toString().take(8)}", companyId, actorName, "team_feed", cleanLine)
+    }
+
+    private fun buildSharedTeamContext(companyId: String): String {
+        val arts = db.listArtifacts(companyId).take(12)
+        val artLines = if (arts.isEmpty()) "none yet" else arts.joinToString("\n") { a ->
+            "- ${a.filename} (${a.relPath}, ${a.sizeBytes}B) by ${a.botName} [QA=${a.qaStatus}]: ${a.summary}"
+        }
+        val feed = runCatching { sandbox.readTextFile(companyId, "workspace/team_feed.md") }.getOrDefault("")
+            .lines().takeLast(14).joinToString("\n")
+        return "SHARED ARTIFACTS CREATED SO FAR (ALL BOTS SEE THIS):\n$artLines\n\nSHARED TEAM ACTIVITY FEED:\n${feed.ifBlank { "none yet" }}"
+    }
+
+    private fun harvestNativeCliArtifacts(companyId: String, botName: String, seenOutNames: MutableSet<String>): List<ArtifactItem> {
+        val newFiles = sandbox.listOutputFiles(companyId).filter { it.name !in seenOutNames }
+        val harvested = mutableListOf<ArtifactItem>()
+        for (f in newFiles) {
+            seenOutNames.add(f.name)
+            val art = registerArtifact(companyId, botName, f.nameWithoutExtension, f, "Generated in sandbox via CLI/IO")
+            harvested.add(art)
+            appendTeamFeed(companyId, botName, "Created artifact ${art.filename} (${art.relPath}, ${art.sizeBytes}B)")
+        }
+        return harvested
+    }
+
+    private suspend fun executeToolOrBatch(
+        comp: CompanyItem,
+        bot: BotItem,
+        parsed: JSONObject,
+        onStatusUpdate: suspend (String) -> Unit,
+    ): Pair<String, List<ArtifactItem>> {
+        val created = mutableListOf<ArtifactItem>()
+        val obsList = mutableListOf<String>()
+        val batch = parsed.optJSONArray("calls")
+        if (batch != null && batch.length() > 0) {
+            for (i in 0 until minOf(batch.length(), 6)) {
+                val c = batch.optJSONObject(i) ?: continue
+                val t = c.optString("tool").ifBlank { continue }
+                val a = c.optJSONObject("args") ?: JSONObject()
+                onStatusUpdate("${bot.name} running $t...")
+                val (obs, art) = executeAnyTool(comp, bot, t, a, onStatusUpdate)
+                art?.let { created.add(it) }
+                obsList.add("[$t] -> $obs")
+            }
+        } else {
+            val t = parsed.optString("tool").ifBlank { if (parsed.has("sections")) "create_pdf" else "" }
+            if (t.isNotBlank()) {
+                val a = parsed.optJSONObject("args") ?: JSONObject()
+                onStatusUpdate("${bot.name} running $t...")
+                val (obs, art) = executeAnyTool(comp, bot, t, a, onStatusUpdate)
+                art?.let { created.add(it) }
+                obsList.add("[$t] -> $obs")
+            }
+        }
+        return obsList.joinToString("\n\n") to created
+    }
+
+    private suspend fun ceoInterrogateBlockedBot(
+        comp: CompanyItem,
+        ceoBot: BotItem,
+        stalledBot: BotItem,
+        reason: String,
+        onStatusUpdate: suspend (String) -> Unit,
+    ): String {
+        val live = _botTelemetry.value[stalledBot.id]
+        val lastTool = live?.currentTool?.ifBlank { "none" } ?: "none"
+        val lastPlugin = live?.currentPlugin?.ifBlank { "Sandbox" } ?: "Sandbox"
+        val lastUrl = live?.currentUrl?.ifBlank { "on-device" } ?: "on-device"
+        val lastThought = live?.currentReasoning?.take(220).orEmpty()
+
+        onStatusUpdate("CEO interrogating ${stalledBot.name} ($reason)...")
+        recordBotActivity(ceoBot, "working", task = "Interrogating ${stalledBot.name}", tool = "ceo_interrogate", plugin = "CEO Oversight")
+
+        val diagSummary = if (hasActiveEngine() && !killSwitch) {
+            val aiDiag = withTimeoutOrNull(15_000L) {
+                runAiCompletion(
+                    systemPrompt = "You are CEO of '${comp.name}'. Briefly interrogate why specialist '${stalledBot.name}' (${stalledBot.role}) blocked/stopped and give a crisp 1-2 sentence recovery plan in the team's language.",
+                    userPrompt = "Trigger: $reason\nBot last tool: $lastTool ($lastPlugin | $lastUrl)\nLast reasoning: $lastThought\nShared context:\n${buildSharedTeamContext(comp.id).take(1200)}",
+                    sandboxDir = sandbox.companyRoot(comp.id),
+                    modelSpec = ceoBot.model,
+                    maxTokens = 260,
+                    onStatus = onStatusUpdate,
+                )
+            }
+            if (aiDiag != null && aiDiag.ok && aiDiag.content.isNotBlank()) aiDiag.content.trim().take(280)
+            else "$reason (dernier outil : $lastTool sur $lastPlugin). Reprise vers le bot suivant."
+        } else {
+            "$reason (dernier outil : $lastTool sur $lastPlugin). Reprise vers le bot suivant."
+        }
+
+        val msgText = "🕵️ [CEO ⇄ ${stalledBot.name}] $reason — Diagnostic CEO : $diagSummary"
+        recordBotActivity(stalledBot, "idle", task = "Skipped after CEO interrogation", reasoning = diagSummary)
+        db.updateBotStatus(stalledBot.id, "idle", "CEO skipped/unblocked")
+        appendTeamFeed(comp.id, "CEO", "Interrogated ${stalledBot.name}: $diagSummary")
+        db.insertMessage(
+            ChatMessageItem(
+                "msg_${UUID.randomUUID().toString().take(10)}",
+                comp.id,
+                "bot",
+                botId = ceoBot.id,
+                botName = "CEO",
+                content = msgText,
+            )
+        )
+        return diagSummary
     }
 
     private fun beginReasoning(actorName: String, modelLabel: String = "", statusLine: String = "Thinking...") {
@@ -646,6 +829,37 @@ class AutonomousEngine(
             return
         }
 
+        // Check if Founder is resuming a stopped/blocked mission ("continue", "reprends", "suivant", ...)
+        val lowerTrim = text.trim().lowercase()
+        val isResumeIntent = targetBotId == null && listOf(
+            "continue", "continuer", "reprend", "reprends", "resume", "suivant", "passe au suivant", "next bot", "go on"
+        ).any { lowerTrim == it || lowerTrim.startsWith("$it ") }
+        val savedCkpt = loadMissionCheckpoint(companyId)
+        if (isResumeIntent && savedCkpt != null) {
+            beginReasoning("CEO", agy?.selectedModel ?: "auto", "Resuming mission & interrogating blocked step...")
+            db.insertMessage(
+                ChatMessageItem(
+                    "msg_${UUID.randomUUID().toString().take(10)}",
+                    companyId,
+                    "bot",
+                    botId = ceoBot?.id,
+                    botName = "CEO",
+                    content = "▶️ Reprise de la mission « ${savedCkpt.title} » — vérification du blocage puis passage au bot suivant.",
+                )
+            )
+            runFullMission(
+                comp = comp,
+                bots = bots,
+                title = savedCkpt.title,
+                goal = savedCkpt.goal,
+                botMandates = savedCkpt.botMandates,
+                resumeCheckpoint = savedCkpt,
+                onStatusUpdate = onStatusUpdate,
+            )
+            finishReasoning("Mission resumed")
+            return
+        }
+
         // User is addressing CEO directly -> always reason via Antigravity CLI / active AI engine
         runCeoReasoningTurn(comp, ceoBot, bots, enrichedPrompt, onStatusUpdate)
     }
@@ -705,6 +919,7 @@ class AutonomousEngine(
             Your team: $teamDesc
             Sandbox files: ${files.ifBlank { "none" }}
             ${pluginExecutor?.activeToolsSummaryForPrompt().orEmpty()}
+            ${buildSharedTeamContext(comp.id)}
             Company memory:
             ${mem.ifBlank { "none" }}
 
@@ -794,13 +1009,12 @@ class AutonomousEngine(
                     finishReasoning("Mission completed")
                     return
                 }
-                act == "tool" && obj != null -> {
-                    val toolName = obj.optString("tool")
-                    val args = obj.optJSONObject("args") ?: JSONObject()
-                    onStatusUpdate("CEO calling $toolName...")
-                    val (obs, createdArt) = executeAnyTool(comp, ceoBot ?: bots.first(), toolName, args, onStatusUpdate)
-                    createdArt?.let { emitArtifactCard(comp, ceoBot?.name ?: "CEO", it) }
-                    history.add("Step $step CEO called $toolName($args)")
+                act == "tool" || act == "tools" || (obj != null && obj.has("calls")) -> {
+                    val seenOut = sandbox.listOutputFiles(comp.id).map { it.name }.toMutableSet()
+                    val (obs, createdArts) = executeToolOrBatch(comp, ceoBot ?: bots.first(), obj!!, onStatusUpdate)
+                    val diskArts = harvestNativeCliArtifacts(comp.id, ceoBot?.name ?: "CEO", seenOut)
+                    (createdArts + diskArts).forEach { emitArtifactCard(comp, ceoBot?.name ?: "CEO", it) }
+                    history.add("Step $step CEO tool batch executed")
                     history.add("Observation:\n$obs")
                 }
                 act == "final" && obj != null -> {
@@ -878,21 +1092,23 @@ class AutonomousEngine(
             Your assigned tools: ${bot.allowedTools.joinToString(", ")}
             Sandbox files: ${files.ifBlank { "none" }}
             ${pluginExecutor?.activeToolsSummaryForPrompt().orEmpty()}
+            ${buildSharedTeamContext(comp.id)}
             Company memory:
             ${mem.ifBlank { "none" }}
 
-            You are an autonomous agentic specialist. Always understand the Founder's request in context of the company objective:
-            - To execute a sandbox tool or connected plugin tool before answering, reply ONLY with JSON:
-              {"action":"tool","tool":"<tool_name>","args":{...}}
+            You are an autonomous agentic specialist. Always use connected plugins & Antigravity CLI/sandbox directly and record artifacts in `output/` so every bot stays aware of all progress:
+            - Execute 1 tool: {"action":"tool","tool":"<tool_name>","args":{...}}
+            - Execute multiple tools together: {"action":"tools","calls":[{"tool":"...","args":{...}},{"tool":"...","args":{...}}]}
             - Otherwise reply directly with your reasoned specialist answer (or {"action":"final","reply":"..."}). Match the Founder's language.
         """.trimIndent()
 
         val history = mutableListOf<String>()
         if (recentChat.isNotBlank()) history.add("Recent conversation:\n$recentChat")
         history.add("Founder request for ${bot.name}:\n$userText")
+        val seenOutNames = sandbox.listOutputFiles(comp.id).map { it.name }.toMutableSet()
 
         for (step in 1..6) {
-            if (killSwitch) break
+            if (killSwitch || runCancelled) break
             onStatusUpdate("${bot.name} reasoning (step $step)...")
             val res = runAiCompletion(
                 systemPrompt = sysPrompt,
@@ -905,15 +1121,20 @@ class AutonomousEngine(
             if (!res.ok) return "⚠️ Erreur IA (${res.provider}): ${res.error}"
             db.addTokensUsed(comp.id, res.tokensUsed)
 
+            // Pick up any native output/ files created directly on disk via Antigravity CLI I/O
+            harvestNativeCliArtifacts(comp.id, bot.name, seenOutNames).forEach { emitArtifactCard(comp, bot.name, it) }
+
             val obj = llm.extractJsonObject(res.content)
             val act = obj?.optString("action")?.lowercase().orEmpty()
-            if (act == "tool" && obj != null) {
-                val toolName = obj.optString("tool")
-                val args = obj.optJSONObject("args") ?: JSONObject()
-                onStatusUpdate("${bot.name} running $toolName...")
-                val (obs, createdArt) = executeAnyTool(comp, bot, toolName, args, onStatusUpdate)
-                createdArt?.let { emitArtifactCard(comp, bot.name, it) }
-                history.add("Step $step called $toolName($args)")
+            if ((act == "tool" || act == "tools" || (obj != null && obj.has("calls"))) && obj != null) {
+                val (obs, createdArts) = executeToolOrBatch(comp, bot, obj, onStatusUpdate)
+                createdArts.forEach { art ->
+                    seenOutNames.add(art.filename)
+                    emitArtifactCard(comp, bot.name, art)
+                    appendTeamFeed(comp.id, bot.name, "Produced artifact ${art.filename} (${art.relPath})")
+                }
+                harvestNativeCliArtifacts(comp.id, bot.name, seenOutNames).forEach { emitArtifactCard(comp, bot.name, it) }
+                history.add("Step $step executed tools")
                 history.add("Observation:\n$obs")
             } else if (act == "final" && obj != null) {
                 return obj.optString("reply").ifBlank { res.content }
@@ -930,6 +1151,7 @@ class AutonomousEngine(
         title: String,
         goal: String,
         botMandates: Map<String, String> = emptyMap(),
+        resumeCheckpoint: MissionCheckpoint? = null,
         onStatusUpdate: suspend (String) -> Unit,
     ) {
         // CEO tailors each specialist's role & prompt according to the company objective + mission + individual role
@@ -993,279 +1215,405 @@ class AutonomousEngine(
         val stage1And2Ids = researchIds + visualDesignBots.map { it.id } + producerBot.id
         val postQaSpecialists = candidates.filter { it.id !in stage1And2Ids }
 
-        val missionId = "msn_${UUID.randomUUID().toString().take(8)}"
-        db.insertMission(missionId, comp.id, title, goal)
-        db.updateBotStatus(ceoBot.id, "working", "Delegating mission...")
-        alignedBots.filterNot { it.isCeo }.forEach { sp ->
-            recordBotActivity(sp, "idle", task = "Mandate assigned: ${sp.role}", reasoning = sp.systemPrompt.take(260))
+        val missionId = resumeCheckpoint?.missionId?.ifBlank { null } ?: "msn_${UUID.randomUUID().toString().take(8)}"
+        if (resumeCheckpoint == null) {
+            db.insertMission(missionId, comp.id, title, goal)
         }
+        val completedIds = resumeCheckpoint?.completedBotIds ?: mutableSetOf()
+        val researchDossier = StringBuilder(resumeCheckpoint?.scopedSpec?.ifBlank { goal } ?: goal)
+        var interruptedTargetId = resumeCheckpoint?.interruptedBotId
 
-        // Stage 1: Research, Trends & Data Discovery Bots run sequentially feeding cumulative findings forward
-        val researchDossier = StringBuilder(goal)
-        for (rBot in researchBots) {
-            if (runCancelled || killSwitch) return
-            if (!hasActiveEngine()) break
-            onStatusUpdate("${rBot.name} (${rBot.role}) researching...")
-            recordBotActivity(rBot, "working", task = "Researching: $title", reasoning = "Executing ${rBot.role}...")
-            db.updateBotStatus(rBot.id, "working", "Research & Data...")
-            val reply = runDirectBotChat(
-                comp = comp,
-                bot = rBot,
-                userText = "You are ${rBot.name} (${rBot.role}) at '${comp.name}' (Objective: ${comp.description}).\n" +
-                    "Use your connected plugins/tools (browser_search, browser_read_url, scite_search, notion_search, gdrive_search, tinyfish_extract) to complete your specific research step for '$title' and report structured findings.\n\nCurrent Brief & Prior Findings:\n${researchDossier.toString().take(2400)}",
-                onStatusUpdate = onStatusUpdate,
-            )
-            if (!reply.startsWith("⚠️") && !runCancelled) {
-                researchDossier.append("\n\n### Findings from ${rBot.name} (${rBot.role}):\n").append(reply)
-                recordBotActivity(rBot, "idle", task = "Research complete", reasoning = reply.take(300))
-                db.updateBotStatus(rBot.id, "idle", "Research done", incrementUnread = true)
-                db.rememberNote("mem_${UUID.randomUUID().toString().take(8)}", comp.id, rBot.name, "report_to_ceo", reply.take(600))
-                db.insertMessage(
-                    ChatMessageItem(
-                        "msg_${UUID.randomUUID().toString().take(10)}",
-                        comp.id,
-                        "bot",
-                        botId = rBot.id,
-                        botName = rBot.name,
-                        content = "📋 [${rBot.name} → CEO] ${reply.lineSequence().firstOrNull { it.isNotBlank() }?.take(180) ?: "Recherche terminée."}",
-                    )
-                )
-            } else {
-                recordBotActivity(rBot, "idle", task = "Ready")
-                db.updateBotStatus(rBot.id, "idle", "Ready")
-            }
-        }
-        val scopedSpec = researchDossier.toString()
-        if (researchBots.isNotEmpty() && !runCancelled) {
-            sandbox.writeTextFile(comp.id, "workspace/${missionId}_spec.md", scopedSpec)
-        }
-        if (runCancelled || killSwitch) return
-
-        // Stage 2a: Primary Producer Bot builds core deliverable(s)
-        onStatusUpdate("${producerBot.name} is building in sandbox...")
-        recordBotActivity(producerBot, "working", task = "Building deliverables: $title")
-        db.updateBotStatus(producerBot.id, "working", "Building deliverable...")
-
-        var createdArtifacts = runProducerAgentLoop(comp, producerBot, missionId, title, goal, scopedSpec, onStatusUpdate).toMutableList()
-        recordBotActivity(producerBot, "idle", task = "Built ${createdArtifacts.size} artifact(s)")
-        db.updateBotStatus(producerBot.id, "idle", "Deliverable ready", incrementUnread = true)
-        db.insertMessage(
-            ChatMessageItem(
-                "msg_${UUID.randomUUID().toString().take(10)}",
+        fun persistCkpt(interruptedId: String? = null) {
+            saveMissionCheckpoint(
                 comp.id,
-                "bot",
-                botId = producerBot.id,
-                botName = producerBot.name,
-                content = "🛠️ [${producerBot.name} → CEO] Production terminée : ${createdArtifacts.joinToString(", ") { it.filename }}",
+                MissionCheckpoint(
+                    missionId = missionId,
+                    title = title,
+                    goal = goal,
+                    scopedSpec = researchDossier.toString(),
+                    completedBotIds = completedIds.toMutableSet(),
+                    interruptedBotId = interruptedId,
+                    botMandates = botMandates,
+                )
             )
-        )
-        if (runCancelled || killSwitch) return
+        }
 
-        // Stage 2b: Visual & Graphic Design Bots generate vector charts, diagrams & visual assets before QA
-        for (vBot in visualDesignBots) {
+        currentMissionCompanyId = comp.id
+        persistCkpt(null)
+
+        try {
+            db.updateBotStatus(ceoBot.id, "working", "Orchestrating mission...")
+            if (resumeCheckpoint == null) {
+                alignedBots.filterNot { it.isCeo }.forEach { sp ->
+                    recordBotActivity(sp, "idle", task = "Mandate assigned: ${sp.role}", reasoning = sp.systemPrompt.take(260))
+                }
+                appendTeamFeed(comp.id, "CEO", "Mission '$title' started — objective: $goal")
+            }
+
+            // Executes any bot under a watchdog timeout + CEO interrogation + clean Stop/Resume checkpointing
+            suspend fun <T> runGuardedBotStep(bot: BotItem, stepLabel: String, block: suspend () -> T): Pair<Boolean, T?> {
+                if (bot.id in completedIds) return true to null
+                if (bot.id == interruptedTargetId) {
+                    interruptedTargetId = null
+                    ceoInterrogateBlockedBot(
+                        comp = comp,
+                        ceoBot = ceoBot,
+                        stalledBot = bot,
+                        reason = "Interrompu à la demande du Fondateur · Reprise au bot suivant",
+                        onStatusUpdate = onStatusUpdate,
+                    )
+                    completedIds.add(bot.id)
+                    persistCkpt(null)
+                    return true to null
+                }
+                if (runCancelled || killSwitch) return false to null
+
+                currentRunningBotId = bot.id
+                persistCkpt(bot.id)
+
+                val timedResult = withTimeoutOrNull(botStepTimeoutMs) { block() }
+                currentRunningBotId = null
+
+                if (runCancelled || killSwitch) {
+                    persistCkpt(bot.id)
+                    recordBotActivity(bot, "stopped", task = "Stopped by Founder")
+                    db.updateBotStatus(bot.id, "idle", "Stopped")
+                    appendTeamFeed(comp.id, bot.name, "Stopped mid-step by Founder during '$stepLabel'")
+                    db.insertMessage(
+                        ChatMessageItem(
+                            "msg_${UUID.randomUUID().toString().take(10)}",
+                            comp.id,
+                            "bot",
+                            botId = ceoBot.id,
+                            botName = "CEO",
+                            content = "⏹️ ${bot.name} arrêté ($stepLabel). Écris « continue » pour que j'interroge ce blocage et lance directement le bot suivant.",
+                        )
+                    )
+                    return false to null
+                }
+
+                if (timedResult == null) {
+                    agy?.stopActiveRun()
+                    ceoInterrogateBlockedBot(
+                        comp = comp,
+                        ceoBot = ceoBot,
+                        stalledBot = bot,
+                        reason = "Délai dépassé (${botStepTimeoutMs / 1000}s) sur $stepLabel",
+                        onStatusUpdate = onStatusUpdate,
+                    )
+                    completedIds.add(bot.id)
+                    persistCkpt(null)
+                    return true to null
+                }
+
+                completedIds.add(bot.id)
+                persistCkpt(null)
+                return true to timedResult
+            }
+
+            // Stage 1: Research, Trends & Data Discovery Bots run sequentially feeding cumulative findings forward
+            for (rBot in researchBots) {
+                if (runCancelled || killSwitch) return
+                if (!hasActiveEngine()) break
+                val (proceed, reply) = runGuardedBotStep(rBot, "Recherche (${rBot.role})") {
+                    onStatusUpdate("${rBot.name} (${rBot.role}) researching...")
+                    recordBotActivity(rBot, "working", task = "Researching: $title", reasoning = "Executing ${rBot.role}...")
+                    db.updateBotStatus(rBot.id, "working", "Research & Data...")
+                    runDirectBotChat(
+                        comp = comp,
+                        bot = rBot,
+                        userText = "You are ${rBot.name} (${rBot.role}) at '${comp.name}' (Objective: ${comp.description}).\n" +
+                            "Use your connected plugins/tools (browser_search, browser_read_url, scite_search, notion_search, gdrive_search, tinyfish_extract) directly to complete your specific research step for '$title', write structured notes/artifacts, and report.\n\nCurrent Brief & Prior Findings:\n${researchDossier.toString().take(2400)}",
+                        onStatusUpdate = onStatusUpdate,
+                    )
+                }
+                if (!proceed) return
+                if (reply != null) {
+                    if (reply.startsWith("⚠️")) {
+                        ceoInterrogateBlockedBot(comp, ceoBot, rBot, reply.take(120), onStatusUpdate)
+                    } else {
+                        researchDossier.append("\n\n### Findings from ${rBot.name} (${rBot.role}):\n").append(reply)
+                        recordBotActivity(rBot, "idle", task = "Research complete", reasoning = reply.take(300))
+                        db.updateBotStatus(rBot.id, "idle", "Research done", incrementUnread = true)
+                        appendTeamFeed(comp.id, rBot.name, reply.lineSequence().firstOrNull { it.isNotBlank() }?.take(180) ?: "Recherche terminée")
+                        db.insertMessage(
+                            ChatMessageItem(
+                                "msg_${UUID.randomUUID().toString().take(10)}",
+                                comp.id,
+                                "bot",
+                                botId = rBot.id,
+                                botName = rBot.name,
+                                content = "📋 [${rBot.name} → CEO] ${reply.lineSequence().firstOrNull { it.isNotBlank() }?.take(180) ?: "Recherche terminée."}",
+                            )
+                        )
+                    }
+                }
+            }
+            val scopedSpec = researchDossier.toString()
+            if (researchBots.isNotEmpty() && !runCancelled) {
+                sandbox.writeTextFile(comp.id, "workspace/${missionId}_spec.md", scopedSpec)
+            }
             if (runCancelled || killSwitch) return
-            if (!hasActiveEngine()) break
-            onStatusUpdate("${vBot.name} designing visuals & charts...")
-            recordBotActivity(vBot, "working", task = "Creating graphics for $title")
-            db.updateBotStatus(vBot.id, "working", "Designing visuals...")
-            val vReply = runDirectBotChat(
-                comp = comp,
-                bot = vBot,
-                userText = "You are ${vBot.name} (${vBot.role}). Create clean vector charts/diagrams/visuals in output/ using `create_svg_graphic` or `product_design_prototype` (or connected Canva/Figma/Kittl plugins) aligned with '${comp.name}' and '$title'.\nResearch & Deliverable context:\n${scopedSpec.take(1600)}",
-                onStatusUpdate = onStatusUpdate,
-            )
-            if (!runCancelled && !vReply.startsWith("⚠️")) {
-                recordBotActivity(vBot, "idle", task = "Visuals ready", reasoning = vReply.take(280))
-                db.updateBotStatus(vBot.id, "idle", "Visuals done", incrementUnread = true)
-                db.rememberNote("mem_${UUID.randomUUID().toString().take(8)}", comp.id, vBot.name, "report_to_ceo", vReply.take(500))
+
+            // Stage 2a: Primary Producer Bot builds core deliverable(s)
+            var createdArtifacts = db.listArtifacts(comp.id).filter { it.botName == producerBot.name }.toMutableList()
+            val (prodOk, prodBuilt) = runGuardedBotStep(producerBot, "Production ($title)") {
+                onStatusUpdate("${producerBot.name} is building in sandbox...")
+                recordBotActivity(producerBot, "working", task = "Building deliverables: $title")
+                db.updateBotStatus(producerBot.id, "working", "Building deliverable...")
+                runProducerAgentLoop(comp, producerBot, missionId, title, goal, scopedSpec, onStatusUpdate)
+            }
+            if (!prodOk) return
+            if (prodBuilt != null) {
+                createdArtifacts = prodBuilt.toMutableList()
+                recordBotActivity(producerBot, "idle", task = "Built ${createdArtifacts.size} artifact(s)")
+                db.updateBotStatus(producerBot.id, "idle", "Deliverable ready", incrementUnread = true)
+                appendTeamFeed(comp.id, producerBot.name, "Built ${createdArtifacts.joinToString(", ") { it.filename }}")
                 db.insertMessage(
                     ChatMessageItem(
                         "msg_${UUID.randomUUID().toString().take(10)}",
                         comp.id,
                         "bot",
-                        botId = vBot.id,
-                        botName = vBot.name,
-                        content = "🎨 [${vBot.name} → CEO] ${vReply.lineSequence().firstOrNull { it.isNotBlank() }?.take(200) ?: "Visuels créés."}",
+                        botId = producerBot.id,
+                        botName = producerBot.name,
+                        content = "🛠️ [${producerBot.name} → CEO] Production terminée : ${createdArtifacts.joinToString(", ") { it.filename }}",
                     )
                 )
-            } else {
-                recordBotActivity(vBot, "idle", task = "Ready")
-                db.updateBotStatus(vBot.id, "idle", "Ready")
+            } else if (createdArtifacts.isEmpty()) {
+                // Guarantee goal completion ("coût que coûte"): synthesize verified PDF from research dossier if Producer timed out/skipped
+                val fallbackArt = buildFallbackPdfArtifact(comp, ceoBot, title, goal, scopedSpec)
+                createdArtifacts.add(fallbackArt)
+                appendTeamFeed(comp.id, "CEO", "Synthesized recovery deliverable ${fallbackArt.filename} to keep mission on track")
             }
-        }
-        if (runCancelled || killSwitch) return
-
-        // Stage 3: Independent Quality Auditor checks deliverables (+ Producer revision if score < 70)
-        onStatusUpdate("${qaBot.name} is verifying quality...")
-        recordBotActivity(qaBot, "working", task = "Auditing ${createdArtifacts.firstOrNull()?.filename ?: title}", tool = "qa_verify", plugin = "Quality Auditor")
-        db.updateBotStatus(qaBot.id, "working", "Auditing in sandbox...")
-
-        var primaryArt = createdArtifacts.firstOrNull()
-        var qaTuple = runIndependentQa(comp, qaBot, primaryArt, goal)
-
-        if ((!qaTuple.first || qaTuple.second < 70) && hasActiveEngine() && !killSwitch && !runCancelled) {
-            onStatusUpdate("${producerBot.name} revising after QA (${qaTuple.second}/100)...")
-            recordBotActivity(producerBot, "working", task = "Revising after QA (${qaTuple.second}/100)")
-            db.updateBotStatus(producerBot.id, "working", "Fixing QA issues...")
-            val revised = runProducerAgentLoop(
-                comp,
-                producerBot,
-                missionId,
-                title,
-                goal,
-                "QA CRITIQUE (${qaTuple.second}/100): ${qaTuple.third}\nFix every flaw above.\n\nOriginal Spec:\n$scopedSpec",
-                onStatusUpdate,
-            )
-            if (revised.isNotEmpty()) {
-                createdArtifacts = revised.toMutableList()
-                primaryArt = revised.firstOrNull()
-                qaTuple = runIndependentQa(comp, qaBot, primaryArt, goal)
-            }
-            recordBotActivity(producerBot, "idle", task = "Revision complete")
-            db.updateBotStatus(producerBot.id, "idle", "Revised", incrementUnread = true)
-        }
-
-        val (qaPassed, qaScore, qaReport) = qaTuple
-        recordBotActivity(qaBot, "idle", task = "QA $qaScore/100 · $qaReport", reasoning = qaReport)
-        db.updateBotStatus(qaBot.id, "idle", "QA $qaScore/100", incrementUnread = true)
-        db.insertMessage(
-            ChatMessageItem(
-                "msg_${UUID.randomUUID().toString().take(10)}",
-                comp.id,
-                "bot",
-                botId = qaBot.id,
-                botName = qaBot.name,
-                content = "🛡️ [${qaBot.name} → CEO] Audit QA : $qaScore/100 — $qaReport",
-            )
-        )
-        if (runCancelled || killSwitch) return
-
-        // Stage 4: Marketing, Video Studio, Instagram/TikTok Social & 24/7 Customer Care / Sales Bots execute after QA
-        for (postBot in postQaSpecialists) {
             if (runCancelled || killSwitch) return
-            if (!hasActiveEngine()) break
-            onStatusUpdate("${postBot.name} (${postBot.role}) running growth/launch...")
-            recordBotActivity(postBot, "working", task = "Executing ${postBot.role} for $title")
-            db.updateBotStatus(postBot.id, "working", "Running ${postBot.role}...")
-            val builtList = sandbox.listOutputFiles(comp.id).joinToString(", ") { it.name }.ifBlank { "none" }
-            val pReply = runDirectBotChat(
-                comp = comp,
-                bot = postBot,
-                userText = "QA passed ($qaScore/100) for mission '$title' (Goal: $goal).\n" +
-                    "Verified sandbox output/ files: $builtList.\n" +
-                    "Using your exact role (${postBot.role}) and real tools/plugins (`product_design_prototype` for interactive promo video reels/ads/sales pages, `create_svg_graphic`, `instagram_list_comments`, `instagram_reply_comment`, `instagram_publish_post`, `tiktok_list_videos`, `tiktok_publish_video`, `gmail_*`, `slack_*`, `http_api_call`), execute your marketing/distribution/24-7 customer-care or sales step cleanly. External writes will automatically ask Founder approval via Ship. Report concisely to CEO.",
-                onStatusUpdate = onStatusUpdate,
-            )
-            if (!runCancelled && !pReply.startsWith("⚠️")) {
-                recordBotActivity(postBot, "idle", task = "Reported to CEO", reasoning = pReply.take(280))
-                db.updateBotStatus(postBot.id, "idle", "Done · Reported", incrementUnread = true)
-                db.rememberNote("mem_${UUID.randomUUID().toString().take(8)}", comp.id, postBot.name, "report_to_ceo", pReply.take(600))
-                db.insertMessage(
-                    ChatMessageItem(
-                        "msg_${UUID.randomUUID().toString().take(10)}",
-                        comp.id,
-                        "bot",
-                        botId = postBot.id,
-                        botName = postBot.name,
-                        content = "🤖 [${postBot.name} → CEO] ${pReply.lineSequence().firstOrNull { it.isNotBlank() }?.take(220) ?: "Tâche exécutée."}",
-                    )
-                )
-            } else {
-                recordBotActivity(postBot, "idle", task = "Standing by")
-                db.updateBotStatus(postBot.id, "idle", "Ready")
-            }
-        }
-        if (runCancelled || killSwitch) return
 
-        // Stage 5: Memory Sync + Artifact Cards + Human Approval Gate
-        memoryBot?.let { mBot ->
-            val memSummary = "Mission '$title' built by ${producerBot.name}; QA by ${qaBot.name}: $qaScore/100 ($qaReport)"
-            recordBotActivity(mBot, "idle", task = "Memory synced ($qaScore/100)", tool = "company_memory", plugin = "Company Memory", reasoning = memSummary)
-            db.updateBotStatus(mBot.id, "idle", "Synced", incrementUnread = true)
+            // Stage 2b: Visual & Graphic Design Bots generate vector charts, diagrams & visual assets before QA
+            for (vBot in visualDesignBots) {
+                if (runCancelled || killSwitch) return
+                if (!hasActiveEngine()) break
+                val (vProceed, vReply) = runGuardedBotStep(vBot, "Design visuel (${vBot.role})") {
+                    onStatusUpdate("${vBot.name} designing visuals & charts...")
+                    recordBotActivity(vBot, "working", task = "Creating graphics for $title")
+                    db.updateBotStatus(vBot.id, "working", "Designing visuals...")
+                    runDirectBotChat(
+                        comp = comp,
+                        bot = vBot,
+                        userText = "You are ${vBot.name} (${vBot.role}). Create clean vector charts/diagrams/visuals in output/ using `create_svg_graphic` or `product_design_prototype` (or connected Canva/Figma/Kittl plugins) aligned with '${comp.name}' and '$title'.\nResearch & Deliverable context:\n${scopedSpec.take(1600)}",
+                        onStatusUpdate = onStatusUpdate,
+                    )
+                }
+                if (!vProceed) return
+                if (vReply != null) {
+                    if (vReply.startsWith("⚠️")) {
+                        ceoInterrogateBlockedBot(comp, ceoBot, vBot, vReply.take(120), onStatusUpdate)
+                    } else {
+                        recordBotActivity(vBot, "idle", task = "Visuals ready", reasoning = vReply.take(280))
+                        db.updateBotStatus(vBot.id, "idle", "Visuals done", incrementUnread = true)
+                        appendTeamFeed(comp.id, vBot.name, vReply.lineSequence().firstOrNull { it.isNotBlank() }?.take(180) ?: "Visuels créés")
+                        db.insertMessage(
+                            ChatMessageItem(
+                                "msg_${UUID.randomUUID().toString().take(10)}",
+                                comp.id,
+                                "bot",
+                                botId = vBot.id,
+                                botName = vBot.name,
+                                content = "🎨 [${vBot.name} → CEO] ${vReply.lineSequence().firstOrNull { it.isNotBlank() }?.take(200) ?: "Visuels créés."}",
+                            )
+                        )
+                    }
+                }
+            }
+            if (runCancelled || killSwitch) return
+
+            // Stage 3: Independent Quality Auditor checks deliverables (+ Producer revision if score < 70)
+            onStatusUpdate("${qaBot.name} is verifying quality...")
+            recordBotActivity(qaBot, "working", task = "Auditing ${createdArtifacts.firstOrNull()?.filename ?: title}", tool = "qa_verify", plugin = "Quality Auditor")
+            db.updateBotStatus(qaBot.id, "working", "Auditing in sandbox...")
+
+            var primaryArt = createdArtifacts.firstOrNull() ?: db.listArtifacts(comp.id).firstOrNull()
+            var qaTuple = withTimeoutOrNull(botStepTimeoutMs) { runIndependentQa(comp, qaBot, primaryArt, goal) }
+                ?: run {
+                    ceoInterrogateBlockedBot(comp, ceoBot, qaBot, "Délai QA dépassé", onStatusUpdate)
+                    primaryArt?.let { sandbox.verifyArtifactProgrammatically(comp.id, it.relPath).let { p -> Triple(p.passed, p.score, p.report) } }
+                        ?: Triple(false, 40, "QA programmatic fallback")
+                }
+
+            if ((!qaTuple.first || qaTuple.second < 70) && hasActiveEngine() && !killSwitch && !runCancelled) {
+                onStatusUpdate("${producerBot.name} revising after QA (${qaTuple.second}/100)...")
+                recordBotActivity(producerBot, "working", task = "Revising after QA (${qaTuple.second}/100)")
+                db.updateBotStatus(producerBot.id, "working", "Fixing QA issues...")
+                val revised = withTimeoutOrNull(botStepTimeoutMs) {
+                    runProducerAgentLoop(
+                        comp,
+                        producerBot,
+                        missionId,
+                        title,
+                        goal,
+                        "QA CRITIQUE (${qaTuple.second}/100): ${qaTuple.third}\nFix every flaw above.\n\nOriginal Spec:\n$scopedSpec",
+                        onStatusUpdate,
+                    )
+                }.orEmpty()
+                if (revised.isNotEmpty()) {
+                    createdArtifacts = revised.toMutableList()
+                    primaryArt = revised.firstOrNull()
+                    qaTuple = runIndependentQa(comp, qaBot, primaryArt, goal)
+                }
+                recordBotActivity(producerBot, "idle", task = "Revision complete")
+                db.updateBotStatus(producerBot.id, "idle", "Revised", incrementUnread = true)
+            }
+
+            val (qaPassed, qaScore, qaReport) = qaTuple
+            recordBotActivity(qaBot, "idle", task = "QA $qaScore/100 · $qaReport", reasoning = qaReport)
+            db.updateBotStatus(qaBot.id, "idle", "QA $qaScore/100", incrementUnread = true)
+            appendTeamFeed(comp.id, qaBot.name, "QA $qaScore/100 — $qaReport")
             db.insertMessage(
                 ChatMessageItem(
                     "msg_${UUID.randomUUID().toString().take(10)}",
                     comp.id,
                     "bot",
-                    botId = mBot.id,
-                    botName = mBot.name,
-                    content = "🧠 [${mBot.name} → CEO] Mémoire d'entreprise synchronisée : $memSummary",
+                    botId = qaBot.id,
+                    botName = qaBot.name,
+                    content = "🛡️ [${qaBot.name} → CEO] Audit QA : $qaScore/100 — $qaReport",
                 )
             )
-        }
+            if (runCancelled || killSwitch) return
 
-        for (art in createdArtifacts) {
-            val status = if (qaPassed) "PASSED" else "FAILED"
-            db.updateArtifactQa(art.id, status, qaScore, qaReport)
-            val updatedArt = art.copy(qaStatus = status, qaScore = qaScore, qaReport = qaReport)
-            val artPayload = JSONObject()
-                .put("id", updatedArt.id)
-                .put("bot_name", updatedArt.botName)
-                .put("title", updatedArt.title)
-                .put("filename", updatedArt.filename)
-                .put("rel_path", updatedArt.relPath)
-                .put("mime_type", updatedArt.mimeType)
-                .put("size_bytes", updatedArt.sizeBytes)
-                .put("summary", updatedArt.summary)
-                .put("qa_status", updatedArt.qaStatus)
-                .put("qa_score", updatedArt.qaScore)
-                .put("qa_report", updatedArt.qaReport)
+            // Stage 4: Marketing, Video Studio, Instagram/TikTok Social & 24/7 Customer Care / Sales Bots execute after QA
+            for (postBot in postQaSpecialists) {
+                if (runCancelled || killSwitch) return
+                if (!hasActiveEngine()) break
+                val (pProceed, pReply) = runGuardedBotStep(postBot, "Growth/Launch (${postBot.role})") {
+                    onStatusUpdate("${postBot.name} (${postBot.role}) running growth/launch...")
+                    recordBotActivity(postBot, "working", task = "Executing ${postBot.role} for $title")
+                    db.updateBotStatus(postBot.id, "working", "Running ${postBot.role}...")
+                    val builtList = sandbox.listOutputFiles(comp.id).joinToString(", ") { it.name }.ifBlank { "none" }
+                    runDirectBotChat(
+                        comp = comp,
+                        bot = postBot,
+                        userText = "QA passed ($qaScore/100) for mission '$title' (Goal: $goal).\n" +
+                            "Verified sandbox output/ files: $builtList.\n" +
+                            "Using your exact role (${postBot.role}) and real tools/plugins (`product_design_prototype` for interactive promo video reels/ads/sales pages, `create_svg_graphic`, `instagram_list_comments`, `instagram_reply_comment`, `instagram_publish_post`, `tiktok_list_videos`, `tiktok_publish_video`, `gmail_*`, `slack_*`, `http_api_call`), execute your marketing/distribution/24-7 customer-care or sales step cleanly. External writes will automatically ask Founder approval via Ship. Report concisely to CEO.",
+                        onStatusUpdate = onStatusUpdate,
+                    )
+                }
+                if (!pProceed) return
+                if (pReply != null) {
+                    if (pReply.startsWith("⚠️")) {
+                        ceoInterrogateBlockedBot(comp, ceoBot, postBot, pReply.take(120), onStatusUpdate)
+                    } else {
+                        recordBotActivity(postBot, "idle", task = "Reported to CEO", reasoning = pReply.take(280))
+                        db.updateBotStatus(postBot.id, "idle", "Done · Reported", incrementUnread = true)
+                        appendTeamFeed(comp.id, postBot.name, pReply.lineSequence().firstOrNull { it.isNotBlank() }?.take(180) ?: "Tâche exécutée")
+                        db.insertMessage(
+                            ChatMessageItem(
+                                "msg_${UUID.randomUUID().toString().take(10)}",
+                                comp.id,
+                                "bot",
+                                botId = postBot.id,
+                                botName = postBot.name,
+                                content = "🤖 [${postBot.name} → CEO] ${pReply.lineSequence().firstOrNull { it.isNotBlank() }?.take(220) ?: "Tâche exécutée."}",
+                            )
+                        )
+                    }
+                }
+            }
+            if (runCancelled || killSwitch) return
+
+            // Stage 5: Memory Sync + Artifact Cards + Human Approval Gate
+            memoryBot?.let { mBot ->
+                val memSummary = "Mission '$title' built by ${producerBot.name}; QA by ${qaBot.name}: $qaScore/100 ($qaReport)"
+                recordBotActivity(mBot, "idle", task = "Memory synced ($qaScore/100)", tool = "company_memory", plugin = "Company Memory", reasoning = memSummary)
+                db.updateBotStatus(mBot.id, "idle", "Synced", incrementUnread = true)
+                appendTeamFeed(comp.id, mBot.name, memSummary)
+                db.insertMessage(
+                    ChatMessageItem(
+                        "msg_${UUID.randomUUID().toString().take(10)}",
+                        comp.id,
+                        "bot",
+                        botId = mBot.id,
+                        botName = mBot.name,
+                        content = "🧠 [${mBot.name} → CEO] Mémoire d'entreprise synchronisée : $memSummary",
+                    )
+                )
+            }
+
+            for (art in createdArtifacts) {
+                val status = if (qaPassed) "PASSED" else "FAILED"
+                db.updateArtifactQa(art.id, status, qaScore, qaReport)
+                val updatedArt = art.copy(qaStatus = status, qaScore = qaScore, qaReport = qaReport)
+                val artPayload = JSONObject()
+                    .put("id", updatedArt.id)
+                    .put("bot_name", updatedArt.botName)
+                    .put("title", updatedArt.title)
+                    .put("filename", updatedArt.filename)
+                    .put("rel_path", updatedArt.relPath)
+                    .put("mime_type", updatedArt.mimeType)
+                    .put("size_bytes", updatedArt.sizeBytes)
+                    .put("summary", updatedArt.summary)
+                    .put("qa_status", updatedArt.qaStatus)
+                    .put("qa_score", updatedArt.qaScore)
+                    .put("qa_report", updatedArt.qaReport)
+                db.insertMessage(
+                    ChatMessageItem(
+                        "msg_${UUID.randomUUID().toString().take(10)}",
+                        comp.id,
+                        "bot",
+                        botId = producerBot.id,
+                        botName = producerBot.name,
+                        content = "${producerBot.name} prepared deliverable",
+                        cardType = "artifact",
+                    ),
+                    rawPayloadJson = artPayload.toString(),
+                )
+            }
+
+            db.rememberNote(
+                "mem_${UUID.randomUUID().toString().take(8)}",
+                comp.id,
+                "Memory",
+                "mission",
+                "Mission '$title' built by ${producerBot.name}; QA by ${qaBot.name}: $qaScore/100 ($qaReport)",
+            )
+
+            // Step 4: CEO opens Human Approval Gate + Android Notification
+            db.updateMissionStatus(missionId, "PENDING_APPROVAL", qaScore)
+            val aprId = "apr_${UUID.randomUUID().toString().take(10)}"
+            val aprPayload = JSONObject()
+                .put("artifact_id", primaryArt?.id ?: "")
+                .put("filename", primaryArt?.filename ?: "")
+                .put("completion_message", "Shipped! Team and memory synced for '$title'.")
+            val approval = ApprovalItem(
+                id = aprId,
+                companyId = comp.id,
+                missionId = missionId,
+                artifactId = primaryArt?.id,
+                title = "Ship ${primaryArt?.title ?: title}?",
+                subtitle = "QA $qaScore/100 by ${qaBot.name} · Verified in on-device sandbox",
+                actionType = "SHIP_RELEASE",
+                actionPayloadJson = aprPayload.toString(),
+                status = "PENDING",
+            )
+            db.insertApproval(approval)
             db.insertMessage(
                 ChatMessageItem(
                     "msg_${UUID.randomUUID().toString().take(10)}",
                     comp.id,
                     "bot",
-                    botId = producerBot.id,
-                    botName = producerBot.name,
-                    content = "${producerBot.name} prepared deliverable",
-                    cardType = "artifact",
+                    botName = "CEO",
+                    content = if (hasActiveEngine()) "${primaryArt?.title ?: title} is ready. Shipping it needs your yes."
+                    else "${primaryArt?.title ?: title} generated in local preview (connect Google in Antigravity CLI or add an LLM key in Settings for AI-authored content). Shipping needs your yes.",
+                    cardType = "approval",
                 ),
-                rawPayloadJson = artPayload.toString(),
+                rawPayloadJson = JSONObject().put("id", aprId).toString(),
             )
+
+            db.updateBotStatus(ceoBot.id, "idle", "Waiting for your yes")
+            ApprovalNotifier.showApprovalNotification(context, approval)
+            clearMissionCheckpoint(comp.id)
+        } finally {
+            currentRunningBotId = null
+            currentMissionCompanyId = null
         }
-
-        db.rememberNote(
-            "mem_${UUID.randomUUID().toString().take(8)}",
-            comp.id,
-            "Memory",
-            "mission",
-            "Mission '$title' built by ${producerBot.name}; QA by ${qaBot.name}: $qaScore/100 ($qaReport)",
-        )
-
-        // Step 4: CEO opens Human Approval Gate + Android Notification
-        db.updateMissionStatus(missionId, "PENDING_APPROVAL", qaScore)
-        val aprId = "apr_${UUID.randomUUID().toString().take(10)}"
-        val aprPayload = JSONObject()
-            .put("artifact_id", primaryArt?.id ?: "")
-            .put("filename", primaryArt?.filename ?: "")
-            .put("completion_message", "Shipped! Team and memory synced for '$title'.")
-        val approval = ApprovalItem(
-            id = aprId,
-            companyId = comp.id,
-            missionId = missionId,
-            artifactId = primaryArt?.id,
-            title = "Ship ${primaryArt?.title ?: title}?",
-            subtitle = "QA $qaScore/100 by ${qaBot.name} · Verified in on-device sandbox",
-            actionType = "SHIP_RELEASE",
-            actionPayloadJson = aprPayload.toString(),
-            status = "PENDING",
-        )
-        db.insertApproval(approval)
-        db.insertMessage(
-            ChatMessageItem(
-                "msg_${UUID.randomUUID().toString().take(10)}",
-                comp.id,
-                "bot",
-                botName = "CEO",
-                content = if (hasActiveEngine()) "${primaryArt?.title ?: title} is ready. Shipping it needs your yes."
-                else "${primaryArt?.title ?: title} generated in local preview (connect Google in Antigravity CLI or add an LLM key in Settings for AI-authored content). Shipping needs your yes.",
-                cardType = "approval",
-            ),
-            rawPayloadJson = JSONObject().put("id", aprId).toString(),
-        )
-
-        db.updateBotStatus(ceoBot.id, "idle", "Waiting for your yes")
-        ApprovalNotifier.showApprovalNotification(context, approval)
     }
 
     private suspend fun runProducerAgentLoop(
@@ -1293,14 +1641,16 @@ class AutonomousEngine(
             ${pluginExecutor?.activeToolsSummaryForPrompt().orEmpty()}
 
             You work inside an isolated Android sandbox (${compRoot.absolutePath}).
-            You MUST use real connected plugin tools or sandbox tools to research, build, and produce thorough, publish-ready deliverables.
+            ${buildSharedTeamContext(comp.id)}
+            You MUST use real connected plugin tools or sandbox tools directly to research, build, and produce thorough, publish-ready deliverables.
             Reply strictly with ONE JSON object per step:
-            - Call a tool:
-              {"action": "tool", "tool": "create_pdf", "args": {"filename": "${slugify(title)}.pdf", "title": "...", "subtitle": "...", "sections": [{"heading": "...", "body": "..."}]}}
+            - Call 1 tool: {"action": "tool", "tool": "create_pdf", "args": {"filename": "${slugify(title)}.pdf", "title": "...", "subtitle": "...", "sections": [{"heading": "...", "body": "..."}]}}
+            - Call multiple tools at once: {"action": "tools", "calls": [{"tool": "...", "args": {...}}]}
               Sandbox tools:
               * "list_files": {}
               * "read_file": {"rel_path": "workspace/uploads/file.txt"}
               * "write_file": {"rel_path": "output/file.md", "content": "..."}
+              * "create_svg_graphic": {"filename": "chart.svg", "title": "...", "svg": "<svg ...>...</svg>"}
               * "create_zip": {"zip_filename": "bundle.zip", "rel_paths": ["output/file1.pdf", "output/file2.md"]}
               * "product_design_prototype": {"filename": "prototype.html", "title": "...", "html": "..."}
               Or ANY connected plugin tool above!
@@ -1327,17 +1677,24 @@ class AutonomousEngine(
             db.addTokensUsed(comp.id, res.tokensUsed)
             lastAiText = res.content
 
-            // Pick up any native output/ files written directly by Antigravity CLI
-            val newlyCreatedOnDisk = sandbox.listOutputFiles(comp.id).filter { it.name !in seenOutNames }
-            for (f in newlyCreatedOnDisk) {
-                seenOutNames.add(f.name)
-                created.add(registerArtifact(comp.id, bot.name, f.nameWithoutExtension, f, "Generated in sandbox"))
-            }
+            // Pick up any native output/ files written directly by Antigravity CLI I/O
+            created.addAll(harvestNativeCliArtifacts(comp.id, bot.name, seenOutNames))
 
             val parsed = llm.extractJsonObject(res.content) ?: break
             val action = parsed.optString("action").lowercase()
             val toolName = parsed.optString("tool")
             when {
+                action == "tools" || parsed.has("calls") -> {
+                    val (obs, arts) = executeToolOrBatch(comp, bot, parsed, onStatusUpdate)
+                    arts.forEach { art ->
+                        seenOutNames.add(art.filename)
+                        created.add(art)
+                        appendTeamFeed(comp.id, bot.name, "Produced artifact ${art.filename} (${art.relPath})")
+                    }
+                    created.addAll(harvestNativeCliArtifacts(comp.id, bot.name, seenOutNames))
+                    promptHistory.add("Step $step ran tool batch")
+                    promptHistory.add("Observation:\n$obs")
+                }
                 action == "tool" || toolName.isNotBlank() -> {
                     val chosenTool = toolName.ifBlank { "create_pdf" }
                     val args = parsed.optJSONObject("args") ?: JSONObject()
@@ -1345,7 +1702,9 @@ class AutonomousEngine(
                     if (art != null) {
                         seenOutNames.add(art.filename)
                         created.add(art)
+                        appendTeamFeed(comp.id, bot.name, "Produced artifact ${art.filename} (${art.relPath})")
                     }
+                    created.addAll(harvestNativeCliArtifacts(comp.id, bot.name, seenOutNames))
                     promptHistory.add("Step $step called $chosenTool")
                     promptHistory.add("Observation:\n$obs")
                 }

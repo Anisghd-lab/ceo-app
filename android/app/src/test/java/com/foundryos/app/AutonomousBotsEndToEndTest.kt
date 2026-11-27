@@ -8,6 +8,7 @@ import com.foundryos.app.engine.OnDeviceLLMClient
 import com.foundryos.app.engine.OnDeviceSandbox
 import com.foundryos.app.plugins.PluginAuthManager
 import com.foundryos.app.plugins.PluginToolExecutor
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.runTest
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
@@ -439,5 +440,135 @@ class AutonomousBotsEndToEndTest {
             "Instagram reply write must be staged for Human Approval alongside final Ship approval",
             db.listMessages(deployed.id).count { it.approval != null } >= 2,
         )
+    }
+
+    @Test
+    fun watchdogInterrogation_unblocksCompanyWhenBotTimesOutAndAdvancesToNextBot() = runTest {
+        aiServer.enqueue(
+            openAiWrap(
+                """{"name":"ResilientCo","mission_statement":"Deliver goals even if a bot stalls.","strategy_summary":"Watchdog + CEO interrogation.","recommended_connectors":[],"bots":[
+                    {"name":"Strategist","role":"Trend Researcher","tagline":"Researches","system_prompt":"Search trends","allowed_tools":["browser_search"],"is_qa":false},
+                    {"name":"Builder","role":"Core Builder","tagline":"Builds PDF","system_prompt":"Create PDF","allowed_tools":["create_pdf"],"is_qa":false},
+                    {"name":"QualityAuditor","role":"QA","tagline":"Audits","system_prompt":"Audit","allowed_tools":["qa_verify"],"is_qa":true}
+                ]}"""
+            )
+        )
+        val proposal = engine.proposeCompany("Resilient startup")
+        val deployed = engine.deployCompany("Resilient startup", proposal)
+
+        engine.botStepTimeoutMs = 220L
+        aiServer.enqueue(openAiWrap("""{"action":"run_mission","title":"Resilient Plan","goal":"Build resilient report","ceo_reply":"Lancement avec surveillance watchdog."}"""))
+        // Bot #1 (Strategist) stalls longer than 220ms!
+        aiServer.enqueue(openAiWrap("""{"action":"final","reply":"Too late"}""").setBodyDelay(900, java.util.concurrent.TimeUnit.MILLISECONDS))
+        // CEO interrogation of stalled Strategist
+        aiServer.enqueue(openAiWrap("""Strategist a expiré sur le réseau ; passage immédiat à Builder pour livrer l'objectif."""))
+        // Bot #2 (Builder) executes cleanly
+        aiServer.enqueue(openAiWrap("""{"action":"tool","tool":"create_pdf","args":{"filename":"resilient.pdf","title":"Resilient Plan","sections":[{"heading":"Plan","body":"Livré malgré le blocage initial."}]}}"""))
+        aiServer.enqueue(openAiWrap("""{"action":"final","summary":"PDF créé."}"""))
+        // QA
+        aiServer.enqueue(openAiWrap("""{"passed":true,"score":92,"report":"Objectif atteint malgré blocage Bot 1."}"""))
+
+        engine.handleFounderMessage(deployed.id, "Lance la mission")
+
+        val timeline = db.listMessages(deployed.id).map { it.content }
+        assertTrue("CEO must interrogate timed-out Strategist", timeline.any { it.contains("[CEO ⇄ Strategist]") && it.contains("Délai dépassé") })
+        assertTrue("Builder must still complete after Strategist timeout", timeline.any { it.contains("[Builder → CEO]") })
+        assertTrue("QA must validate final deliverable", timeline.any { it.contains("[QualityAuditor → CEO]") && it.contains("92/100") })
+        assertTrue("Final deliverable PDF must exist", sandbox.resolveFile(deployed.id, "output/resilient.pdf").exists())
+        val feed = sandbox.readTextFile(deployed.id, "workspace/team_feed.md")
+        assertTrue("Shared team feed must record interrogation & artifacts", feed.contains("Interrogated Strategist") && feed.contains("resilient.pdf"))
+    }
+
+    @Test
+    fun stopMidBotAndContinue_interrogatesStoppedBotAndResumesAtNextBot() = runTest {
+        aiServer.enqueue(
+            openAiWrap(
+                """{"name":"ResumeCo","mission_statement":"Resume smoothly after stopping a blocked bot.","strategy_summary":"Stop Bot #2 -> continue -> Bot #3 runs.","recommended_connectors":[],"bots":[
+                    {"name":"Strategist","role":"Researcher","tagline":"Scopes","system_prompt":"Scope mission","allowed_tools":["browser_search"],"is_qa":false},
+                    {"name":"Builder","role":"Core Builder","tagline":"Builds","system_prompt":"Build deliverable","allowed_tools":["create_pdf"],"is_qa":false},
+                    {"name":"Publisher","role":"Growth & Marketing","tagline":"Publishes showcase","system_prompt":"Build HTML launch page","allowed_tools":["product_design_prototype"],"is_qa":false},
+                    {"name":"QualityAuditor","role":"QA","tagline":"Audits","system_prompt":"Audit","allowed_tools":["qa_verify"],"is_qa":true}
+                ]}"""
+            )
+        )
+        val proposal = engine.proposeCompany("Resume test")
+        val deployed = engine.deployCompany("Resume test", proposal)
+
+        // Start mission: Strategist finishes, Builder hangs -> Founder triggers stopAllExecution()
+        aiServer.enqueue(openAiWrap("""{"action":"run_mission","title":"Launch Kit","goal":"Build launch kit","ceo_reply":"Démarrage équipe."}"""))
+        aiServer.enqueue(openAiWrap("""{"action":"final","reply":"Spec validée par Strategist."}"""))
+        // Builder hangs until stopped mid-step
+        aiServer.enqueue(openAiWrap("""{"action":"final","reply":"Unreached"}""").setBodyDelay(1500, java.util.concurrent.TimeUnit.MILLISECONDS))
+
+        val stopTrigger = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Default).launch {
+            kotlinx.coroutines.delay(350)
+            engine.stopAllExecution()
+        }
+        engine.handleFounderMessage(deployed.id, "Démarre le kit")
+        stopTrigger.join()
+
+        val afterStop = db.listMessages(deployed.id).map { it.content }
+        assertTrue("Strategist should have finished before stop", afterStop.any { it.contains("[Strategist → CEO]") })
+        assertTrue("Stop notice for Builder missing", afterStop.any { it.contains("Builder arrêté") && it.contains("continue") })
+
+        // Now Founder sends "continue" -> CEO interrogates stopped Builder, synthesizes recovery PDF, runs Bot #3 (Publisher) + QA + Approval!
+        aiServer.enqueue(openAiWrap("""Builder a été arrêté à mi-parcours ; reprise immédiate sur Publisher pour finaliser."""))
+        aiServer.enqueue(openAiWrap("""{"passed":true,"score":91,"report":"Livrable de reprise validé."}"""))
+        aiServer.enqueue(openAiWrap("""{"action":"tool","tool":"product_design_prototype","args":{"filename":"launch_bot3.html","title":"Bot 3 Showcase","summary":"Executed immediately after continue!"}}"""))
+        aiServer.enqueue(openAiWrap("""{"action":"final","reply":"Publisher (Bot 3) a terminé le showcase après reprise."}"""))
+
+        engine.handleFounderMessage(deployed.id, "continue")
+
+        val afterContinue = db.listMessages(deployed.id).map { it.content }
+        assertTrue("CEO must interrogate stopped Builder on continue", afterContinue.any { it.contains("[CEO ⇄ Builder]") })
+        assertTrue("Bot #3 (Publisher) must run on continue!", afterContinue.any { it.contains("[Publisher → CEO]") })
+        assertTrue("Publisher artifact must exist", sandbox.resolveFile(deployed.id, "output/launch_bot3.html").exists())
+        assertTrue("Mission approval gate must open after resume", db.listMessages(deployed.id).any { it.approval?.status == "PENDING" })
+    }
+
+    @Test
+    fun multiToolBatchAndSharedFeed_syncsArtifactsAcrossAllBots() = runTest {
+        val cid = "cmp_batch_feed"
+        db.insertCompany(
+            com.foundryos.app.data.CompanyItem(
+                id = cid,
+                name = "BatchCo",
+                description = "Test direct multi-plugin execution and shared artifact feed",
+                missionStatement = "Sync all bots via shared artifacts",
+                status = "ACTIVE",
+                botsCount = 1,
+            )
+        )
+        val bot = com.foundryos.app.data.BotItem(
+            id = "b_ceo_batch",
+            companyId = cid,
+            name = "CEO",
+            role = "CEO",
+            tagline = "Direct plugin caller",
+            systemPrompt = "Call plugins directly",
+            allowedTools = listOf("browser_search", "create_svg_graphic"),
+            model = "auto",
+            isCeo = true,
+            isQa = false,
+        )
+        db.insertBot(bot)
+
+        pluginServer.enqueue(MockResponse().setResponseCode(200).setBody("""["batch",["Batch Processing"],["Direct API call"],["https://en.wikipedia.org/wiki/Batch"]]"""))
+        pluginServer.enqueue(MockResponse().setResponseCode(200).setBody("""{}"""))
+        pluginServer.enqueue(MockResponse().setResponseCode(200).setBody("""{}"""))
+
+        aiServer.enqueue(
+            openAiWrap(
+                """{"action":"tools","calls":[{"tool":"browser_search","args":{"query":"Batch API"}},{"tool":"create_svg_graphic","args":{"filename":"sync_map.svg","title":"Team Sync Diagram","summary":"Shared visual artifact"}}]}"""
+            )
+        )
+        aiServer.enqueue(openAiWrap("""{"action":"final","reply":"Recherche + graphique SVG créés en parallèle et partagés."}"""))
+
+        engine.handleFounderMessage(cid, "Fais une recherche puis génère le diagramme SVG directement")
+
+        assertTrue("SVG artifact must exist in output/", sandbox.resolveFile(cid, "output/sync_map.svg").exists())
+        val feed = sandbox.readTextFile(cid, "workspace/team_feed.md")
+        assertTrue("Team feed must contain sync_map.svg for other bots", feed.contains("sync_map.svg"))
+        assertTrue("Final CEO answer saved", db.listMessages(cid).any { it.content.contains("partagés") })
     }
 }

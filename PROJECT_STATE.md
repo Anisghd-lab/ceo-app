@@ -29,6 +29,11 @@
 - [x] **Backend Python (`backend/`)** : 5/5 tests `pytest` verts.
 - [x] **FreeLLMAPI (`freellmapi`) + Pool Modèles Gratuits (`v0.7.0`)** :
   - Fournisseur natif `freellmapi` avec URL de passerelle configurable (défaut `http://127.0.0.1:3001`), jeton Bearer optionnel en local, filtre automatique sur `available == true`, badge `FREE`, épingle `auto` / `fusion` et activation automatique du routeur gratuit.
+- [x] **Watchdog Anti-Blocage, Interrogation CEO & Reprise (`v0.7.1`)** :
+  - `AgyRuntimeManager.runPrompt` inclut un watchdog processus (`120s`) pour détruire tout processus `agy` bloqué.
+  - `AutonomousEngine.runFullMission` exécute chaque bot sous `botStepTimeoutMs` (`75s`), déclenche automatiquement **`ceoInterrogateBlockedBot`** (`[CEO ⇄ Bot]`) en cas de timeout/blocage/arrêt et passe au bot suivant ou reprend exactement au bot N+1 sur commande **`continue` / `reprends` / `suivant`** grâce au checkpoint persistant (`MissionCheckpoint`).
+  - Journal partagé **`workspace/team_feed.md`** + `buildSharedTeamContext` + récolte automatique des fichiers générés sur disque par `agy` pour que tous les bots voient en temps réel chaque artefact et action API.
+  - Batch multi-outils (`{"action":"tools","calls":[...]}`) + bouton **« ⚡ Activate Free Auto »** FreeLLMAPI + repli automatique vers `"auto"` si un slot FreeLLMAPI renvoie `404`/`503`.
 - [x] **UX Mobile Entreprises & Avatars Animés (`v0.7.0`)** :
   - **Glisser-déposer sur les entreprises (`SwipeableCompanyRow`)** : glisser à gauche pour supprimer l'entreprise + sa sandbox, glisser à droite pour archiver / restaurer dans la section repliable `Archivées`.
   - **Mascottes animées au travail réel (`BotMascot`)** : animation fluide (pulsation scale, micro-balancement, aura radar active et mouvement des yeux) déclenchée uniquement lorsque le bot est réellement en statut `working`.

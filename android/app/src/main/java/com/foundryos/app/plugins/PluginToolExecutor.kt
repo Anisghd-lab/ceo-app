@@ -51,18 +51,19 @@ class PluginToolExecutor(
         val connected = statuses.filter { it.connected }
         val pending = statuses.filterNot { it.connected }
         return buildString {
-            append("CONNECTED PLUGINS READY NOW:\n")
+            append("CONNECTED PLUGINS READY NOW (CALL THESE DIRECTLY IN JSON):\n")
             for (st in connected) {
                 append("- ${st.definition.name} (${st.accountLabel}):\n")
                 for (t in st.definition.tools) {
-                    val tag = if (t.isWriteAction) " [WRITE->Human Approval]" else ""
-                    append("  * ${t.name}${tag}: ${t.description} · args=${t.argsSchema}\n")
+                    val tag = if (t.isWriteAction) " [WRITE->Human Approval]" else " [DIRECT]"
+                    append("  * ${t.name}$tag: ${t.description} · call={\"action\":\"tool\",\"tool\":\"${t.name}\",\"args\":${t.argsSchema}}\n")
                 }
             }
+            append("\nEXECUTION RULE: Prefer invoking connected plugin tools DIRECTLY right away (or batch multiple via {\"action\":\"tools\",\"calls\":[{\"tool\":\"...\",\"args\":{...}}]}) before writing answers.\n")
             if (pending.isNotEmpty()) {
                 append("\nPLUGINS WAITING FOR USER SIGN-IN IN SETTINGS:\n")
                 append(pending.joinToString(", ") { "${it.definition.name} (${it.definition.id})" })
-                append("\n(If a goal needs a plugin not yet connected, tell the user honestly which plugin to tap Connect on in Settings, or use Browser as fallback if public.)")
+                append("\n(If a goal needs an unauthenticated plugin, use Browser as fallback if public, or state concisely which plugin needs sign-in.)")
             }
         }
     }

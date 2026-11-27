@@ -430,7 +430,12 @@ class OnDeviceLLMClient(context: Context) {
             maxTokens = 16,
         )
         return if (res.ok) true to "$p · $cleanModel verified ✓"
-        else false to (res.error.ifBlank { "Model test failed" })
+        else {
+            val hint = if (p == "freellmapi" && cleanModel != "auto" && (res.error.contains("404") || res.error.contains("503"))) {
+                " · Tip: select 'auto' (Free Smart Router) at the top of the list."
+            } else ""
+            false to (res.error.ifBlank { "Model test failed" } + hint)
+        }
     }
 
     suspend fun complete(
@@ -469,6 +474,10 @@ class OnDeviceLLMClient(context: Context) {
             val hasCreds = key.isNotBlank() || canSkipApiKey(prov)
             if (hasCreds && mod.isNotBlank() && out.none { it.first == prov }) {
                 out.add(Triple(prov, mod, key))
+                // On FreeLLMAPI, automatically fail over from stale/rate-limited slots to the "auto" free router
+                if (prov == "freellmapi" && !mod.equals("auto", ignoreCase = true)) {
+                    out.add(Triple(prov, "auto", key))
+                }
             }
         }
         return out

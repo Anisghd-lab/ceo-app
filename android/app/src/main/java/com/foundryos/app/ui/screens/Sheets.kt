@@ -1222,6 +1222,30 @@ fun SettingsDialog(
                         shape = RoundedCornerShape(12.dp),
                         modifier = Modifier.fillMaxWidth(),
                     )
+                    Spacer(Modifier.height(6.dp))
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(999.dp))
+                            .background(FoundryColors.GreenInk)
+                            .clickable(enabled = !isTestingModel) {
+                                if (gatewayUrlInput.trim().startsWith("http")) {
+                                    onSaveProviderBaseUrl("freellmapi", gatewayUrlInput.trim())
+                                }
+                                if (apiKeyInput.isNotBlank() && liveModels.isEmpty()) {
+                                    onFetchModels("freellmapi", apiKeyInput.trim())
+                                }
+                                selectedModel = "auto"
+                                onSelectAndTestModel("freellmapi", "auto")
+                            }
+                            .padding(horizontal = 12.dp, vertical = 6.dp),
+                    ) {
+                        Text(
+                            text = if (selectedModel == "auto") "✓ Free Auto Router Active" else "⚡ Activate Free Auto (Recommended)",
+                            fontSize = 11.5.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = Color.White,
+                        )
+                    }
                 }
             }
 

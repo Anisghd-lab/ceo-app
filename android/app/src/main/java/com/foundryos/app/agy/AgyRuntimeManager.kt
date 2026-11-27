@@ -521,6 +521,7 @@ class AgyRuntimeManager(private val context: Context) {
         sandboxDir: File,
         prompt: String,
         modelId: String = selectedModel,
+        timeoutMs: Long = 120_000L,
         onStatus: suspend (String) -> Unit = {},
         onThinkingDelta: suspend (String) -> Unit = {},
     ): Pair<Boolean, String> = runMutex.withLock {
@@ -560,6 +561,15 @@ class AgyRuntimeManager(private val context: Context) {
             try {
                 val proc = pb.start()
                 activeRunProcess = proc
+                @Volatile var timedOut = false
+                val watchdogJob = scope.launch {
+                    delay(timeoutMs)
+                    if (activeRunProcess === proc && proc.isAlive) {
+                        timedOut = true
+                        addLog("Watchdog killed stalled agy process after ${timeoutMs / 1000}s")
+                        runCatching { proc.destroyForcibly() }
+                    }
+                }
                 val errBuffer = StringBuilder()
                 val errJob = scope.launch {
                     runCatching {
@@ -606,6 +616,7 @@ class AgyRuntimeManager(private val context: Context) {
                 }
 
                 val code = proc.waitFor()
+                watchdogJob.cancel()
                 runCatching { errJob.join() }
                 activeRunProcess = null
 
@@ -615,7 +626,9 @@ class AgyRuntimeManager(private val context: Context) {
                     .trim()
                 val errText = errBuffer.toString().trim()
 
-                if (resultStatus.equals("ERROR", ignoreCase = true)) {
+                if (timedOut) {
+                    false to "agy timed out after ${timeoutMs / 1000}s"
+                } else if (resultStatus.equals("ERROR", ignoreCase = true)) {
                     false to resultError.ifBlank { answer }.ifBlank { errText }.ifBlank { "Antigravity CLI error" }
                 } else if (answer.isNotBlank()) {
                     true to answer

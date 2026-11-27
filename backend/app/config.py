@@ -22,7 +22,8 @@ class AppConfig(BaseModel):
 
 
 def load_config(base_dir: Path | None = None) -> AppConfig:
-    root = base_dir or Path(os.environ.get("FOUNDRY_BASE_DIR", "/root/foundry-os/runtime"))
+    default_root = Path(__file__).resolve().parents[2] / "runtime"
+    root = base_dir or Path(os.environ.get("FOUNDRY_BASE_DIR", str(default_root)))
     data_dir = root / "data"
     sandboxes_dir = root / "sandboxes"
     data_dir.mkdir(parents=True, exist_ok=True)

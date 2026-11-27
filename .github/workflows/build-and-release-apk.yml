@@ -7,9 +7,9 @@ on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: 'Release tag (e.g. v0.6.0)'
+        description: 'Release tag (e.g. v0.6.1)'
         required: false
-        default: 'v0.6.0'
+        default: 'v0.6.1'
 
 permissions:
   contents: write
@@ -81,22 +81,24 @@ jobs:
             if [[ "${{ github.ref }}" == refs/tags/* ]]; then
               TAG="${{ github.ref_name }}"
             else
-              TAG="v0.6.0"
+              TAG="v0.6.1"
             fi
           fi
 
           APK_PATH="android/app/build/outputs/apk/debug/app-debug.apk"
           SHA256="$(sha256sum "$APK_PATH" | awk '{print $1}')"
           SIZE="$(du -h "$APK_PATH" | awk '{print $1}')"
-          ASSET_NAME="ceo-${TAG}-debug.apk"
+          ASSET_NAME="ceo-${TAG}.apk"
+          UNIQUE_APK="/tmp/${ASSET_NAME}"
+          cp "$APK_PATH" "$UNIQUE_APK"
 
           NOTES="$(printf '### CEO — 100%% On-Device Autonomous Company OS (%s)\n\n- **Antigravity CLI embarqué** (`agy` ARM64 officiel, sans VPS ni Termux) + **Multi-comptes Google** (sauvegarde, switch instantané, ajout de compte sans révoquer les tokens)\n- **Quotas & Modèles en direct** : barres 5h / Weekly et pourcentage restant par modèle\n- **Navigateur In-App intégré** (OAuth Google loopback + navigation web + fallback Chrome)\n- **Routeur Multi-LLM & Custom Providers** + **Sélecteur de fichiers locaux (`+`)** + **Sandboxes SQLite/PDF/ZIP 100%% locales**\n- **Taille APK** : `%s`\n- **SHA-256** : `%s`\n- **Compilé sur** : GitHub Actions (`ubuntu-latest`)\n' "$TAG" "$SIZE" "$SHA256")"
 
           if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release upload "$TAG" "${APK_PATH}#${ASSET_NAME}" --clobber
+            gh release upload "$TAG" "$UNIQUE_APK" --clobber
             gh release edit "$TAG" --title "${TAG} — CEO (Android APK)" --notes "$NOTES"
           else
-            gh release create "$TAG" "${APK_PATH}#${ASSET_NAME}" \
+            gh release create "$TAG" "$UNIQUE_APK" \
               --title "${TAG} — CEO (Android APK)" \
               --notes "$NOTES"
           fi

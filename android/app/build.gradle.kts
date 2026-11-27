@@ -13,8 +13,8 @@ android {
         minSdk = 26
         // Required (matching AntiGem / Termux) so Android allows execve() on the downloaded native agy binary inside filesDir
         targetSdk = 28
-        versionCode = 10
-        versionName = "0.6.0"
+        versionCode = 11
+        versionName = "0.6.1"
     }
 
     signingConfigs {

@@ -95,14 +95,19 @@ class AppUpdateManager(private val context: Context) {
         }
 
         val updatesDir = File(context.cacheDir, "updates").apply { mkdirs() }
-        val targetApk = File(updatesDir, "ceo-update.apk")
-        val tempApk = File(updatesDir, "ceo-update.apk.part")
+        // Purge previous update files so Android PackageInstaller never serves a cached URI
+        updatesDir.listFiles()?.forEach { runCatching { it.delete() } }
+
+        val stamp = System.currentTimeMillis()
+        val targetApk = File(updatesDir, "ceo-update-$stamp.apk")
+        val tempApk = File(updatesDir, "ceo-update-$stamp.apk.part")
 
         try {
             onProgress(0.02f, "Downloading signed APK...")
             val req = Request.Builder()
                 .url(downloadUrl)
-                .header("Accept", "application/vnd.github+json")
+                .header("Accept", "application/octet-stream, */*")
+                .header("Cache-Control", "no-cache")
                 .header("User-Agent", "CEO-Android-Updater")
                 .get()
                 .build()
@@ -145,14 +150,24 @@ class AppUpdateManager(private val context: Context) {
                 tempApk.delete()
             }
 
-            onProgress(1f, "Launching Android Installer...")
+            // Inspect the actual downloaded APK package info to confirm version before launching installer
+            val pkgInfo = runCatching {
+                context.packageManager.getPackageArchiveInfo(targetApk.absolutePath, 0)
+            }.getOrNull()
+            val downloadedVersion = pkgInfo?.versionName ?: "latest"
+
+            onProgress(1f, "Launching installer for v$downloadedVersion...")
             val apkUri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", targetApk)
             val installIntent = Intent(Intent.ACTION_VIEW).apply {
                 setDataAndType(apkUri, "application/vnd.android.package-archive")
-                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+                addFlags(
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION or
+                        Intent.FLAG_ACTIVITY_NEW_TASK or
+                        Intent.FLAG_ACTIVITY_CLEAR_TOP
+                )
             }
             context.startActivity(installIntent)
-            true to "Installer opened — tap Update!"
+            true to "Installing CEO v$downloadedVersion — tap Update!"
         } catch (e: Exception) {
             false to (e.message ?: "Update install failed")
         }
@@ -162,6 +177,7 @@ class AppUpdateManager(private val context: Context) {
         val req = Request.Builder()
             .url(url)
             .header("Accept", "application/vnd.github+json")
+            .header("Cache-Control", "no-cache")
             .header("User-Agent", "CEO-Android-Updater")
             .get()
             .build()

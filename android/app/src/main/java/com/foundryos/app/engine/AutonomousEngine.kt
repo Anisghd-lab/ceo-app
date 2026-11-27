@@ -269,6 +269,9 @@ class AutonomousEngine(
         return obsList.joinToString("\n\n") to created
     }
 
+    private suspend fun <T> withWallTimeoutOrNull(timeoutMs: Long, block: suspend () -> T): T? =
+        withContext(Dispatchers.IO) { withTimeoutOrNull(timeoutMs) { block() } }
+
     private suspend fun ceoInterrogateBlockedBot(
         comp: CompanyItem,
         ceoBot: BotItem,
@@ -286,7 +289,7 @@ class AutonomousEngine(
         recordBotActivity(ceoBot, "working", task = "Interrogating ${stalledBot.name}", tool = "ceo_interrogate", plugin = "CEO Oversight")
 
         val diagSummary = if (hasActiveEngine() && !killSwitch) {
-            val aiDiag = withTimeoutOrNull(15_000L) {
+            val aiDiag = withWallTimeoutOrNull(15_000L) {
                 runAiCompletion(
                     systemPrompt = "You are CEO of '${comp.name}'. Briefly interrogate why specialist '${stalledBot.name}' (${stalledBot.role}) blocked/stopped and give a crisp 1-2 sentence recovery plan in the team's language.",
                     userPrompt = "Trigger: $reason\nBot last tool: $lastTool ($lastPlugin | $lastUrl)\nLast reasoning: $lastThought\nShared context:\n${buildSharedTeamContext(comp.id).take(1200)}",
@@ -1332,7 +1335,7 @@ class AutonomousEngine(
                 currentRunningBotId = bot.id
                 persistCkpt(bot.id)
 
-                val timedResult = withTimeoutOrNull(botStepTimeoutMs) { block() }
+                val timedResult = withWallTimeoutOrNull(botStepTimeoutMs) { block() }
                 currentRunningBotId = null
 
                 if (runCancelled || killSwitch) {
@@ -1492,7 +1495,7 @@ class AutonomousEngine(
             db.updateBotStatus(qaBot.id, "working", "Auditing in sandbox...")
 
             var primaryArt = createdArtifacts.firstOrNull() ?: db.listArtifacts(comp.id).firstOrNull()
-            var qaTuple = withTimeoutOrNull(botStepTimeoutMs) { runIndependentQa(comp, qaBot, primaryArt, goal) }
+            var qaTuple = withWallTimeoutOrNull(botStepTimeoutMs) { runIndependentQa(comp, qaBot, primaryArt, goal) }
                 ?: run {
                     ceoInterrogateBlockedBot(comp, ceoBot, qaBot, "Délai QA dépassé", onStatusUpdate)
                     primaryArt?.let { sandbox.verifyArtifactProgrammatically(comp.id, it.relPath).let { p -> Triple(p.passed, p.score, p.report) } }
@@ -1503,7 +1506,7 @@ class AutonomousEngine(
                 onStatusUpdate("${producerBot.name} revising after QA (${qaTuple.second}/100)...")
                 recordBotActivity(producerBot, "working", task = "Revising after QA (${qaTuple.second}/100)")
                 db.updateBotStatus(producerBot.id, "working", "Fixing QA issues...")
-                val revised = withTimeoutOrNull(botStepTimeoutMs) {
+                val revised = withWallTimeoutOrNull(botStepTimeoutMs) {
                     runProducerAgentLoop(
                         comp,
                         producerBot,

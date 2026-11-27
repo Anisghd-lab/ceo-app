@@ -235,3 +235,14 @@ data class PluginToolResult(
     val approvalTitle: String = "",
     val approvalSummary: String = "",
 )
+
+data class AppUpdateInfo(
+    val currentVersion: String,
+    val latestVersion: String,
+    val hasUpdate: Boolean,
+    val downloadUrl: String = "",
+    val sizeBytes: Long = 0L,
+    val releaseNotes: String = "",
+    val releaseUrl: String = "",
+    val error: String = "",
+)

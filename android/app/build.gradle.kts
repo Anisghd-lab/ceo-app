@@ -13,17 +13,34 @@ android {
         minSdk = 26
         // Required (matching AntiGem / Termux) so Android allows execve() on the downloaded native agy binary inside filesDir
         targetSdk = 28
-        versionCode = 7
-        versionName = "0.4.1"
+        versionCode = 8
+        versionName = "0.5.0"
+    }
+
+    signingConfigs {
+        val ksPath = System.getenv("ANDROID_KEYSTORE_PATH")
+        if (!ksPath.isNullOrBlank() && file(ksPath).exists()) {
+            create("ceoRelease") {
+                storeFile = file(ksPath)
+                storePassword = System.getenv("ANDROID_KEYSTORE_PASSWORD") ?: ""
+                keyAlias = System.getenv("ANDROID_KEY_ALIAS") ?: "ceo"
+                keyPassword = System.getenv("ANDROID_KEY_PASSWORD") ?: ""
+            }
+        }
     }
 
     buildTypes {
+        val persistentSig = signingConfigs.findByName("ceoRelease")
         release {
             isMinifyEnabled = false
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
+            if (persistentSig != null) signingConfig = persistentSig
+        }
+        debug {
+            if (persistentSig != null) signingConfig = persistentSig
         }
     }
 

@@ -84,6 +84,7 @@ import com.foundryos.app.data.AgyAuthState
 import com.foundryos.app.data.AgyCliStatus
 import com.foundryos.app.data.AgyModelInfo
 import com.foundryos.app.data.AgyQuotaGroup
+import com.foundryos.app.data.AppUpdateInfo
 import com.foundryos.app.data.ArtifactItem
 import com.foundryos.app.data.AttachedLocalFile
 import com.foundryos.app.data.BotItem
@@ -160,6 +161,10 @@ fun FoundryMainScreen(repo: FoundryRepository) {
 
     var hasAnyKey by remember { mutableStateOf(false) }
     var engineSummary by remember { mutableStateOf("On-Device Engine") }
+    val appVersion = remember { repo.currentAppVersion() }
+    var appUpdateInfo by remember { mutableStateOf<AppUpdateInfo?>(null) }
+    var updateProgress by remember { mutableStateOf<Float?>(null) }
+    var updateStatusLabel by remember { mutableStateOf<String?>(null) }
     var pluginStatuses by remember { mutableStateOf<List<PluginStatus>>(emptyList()) }
     var providers by remember { mutableStateOf<List<ProviderStatus>>(emptyList()) }
     var killSwitch by remember { mutableStateOf(repo.killSwitch) }
@@ -220,6 +225,7 @@ fun FoundryMainScreen(repo: FoundryRepository) {
     LaunchedEffect(Unit) {
         refreshAll()
         refreshAgyState(fetchQuotas = true)
+        appUpdateInfo = repo.checkForAppUpdate()
     }
 
     // Open Google OAuth sign-in URLs inside the in-app WebView browser automatically
@@ -961,6 +967,10 @@ fun FoundryMainScreen(repo: FoundryRepository) {
             agyQuotaGroups = agyQuotaGroups,
             agyBusyLabel = agyBusyLabel,
             agyInstallProgress = agyInstallProgress,
+            appVersion = appVersion,
+            updateInfo = appUpdateInfo,
+            updateProgress = updateProgress,
+            updateStatusLabel = updateStatusLabel,
             plugins = pluginStatuses,
             providers = providers,
             connectors = connectors,
@@ -1085,6 +1095,34 @@ fun FoundryMainScreen(repo: FoundryRepository) {
                 repo.disconnectPlugin(pluginId)
                 refreshAll(activeCompanyId)
                 Toast.makeText(context, "Disconnected $pluginId", Toast.LENGTH_SHORT).show()
+            },
+            onCheckAppUpdate = {
+                scope.launch {
+                    updateStatusLabel = "Checking GitHub Releases..."
+                    updateProgress = null
+                    val info = repo.checkForAppUpdate()
+                    appUpdateInfo = info
+                    updateStatusLabel = null
+                    val msg = when {
+                        info.error.isNotBlank() -> info.error
+                        info.hasUpdate -> "Update v${info.latestVersion} available!"
+                        else -> "CEO v${info.currentVersion} is up to date."
+                    }
+                    Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
+                }
+            },
+            onInstallAppUpdate = { downloadUrl ->
+                scope.launch {
+                    updateStatusLabel = "Starting update download..."
+                    updateProgress = 0f
+                    val (ok, msg) = repo.downloadAndInstallUpdate(downloadUrl) { frac, detail ->
+                        updateProgress = frac
+                        updateStatusLabel = detail
+                    }
+                    updateProgress = null
+                    updateStatusLabel = null
+                    Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
+                }
             },
             onAddCustomProvider = { name, baseUrl, protocol ->
                 val slug = repo.addCustomProvider(name, baseUrl, protocol)

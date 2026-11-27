@@ -36,6 +36,7 @@ import androidx.compose.material.icons.rounded.Public
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material.icons.rounded.SwapHoriz
+import androidx.compose.material.icons.rounded.SystemUpdate
 import androidx.compose.material.icons.rounded.Terminal
 import androidx.compose.material.icons.rounded.Visibility
 import androidx.compose.material.icons.rounded.VisibilityOff
@@ -75,6 +76,7 @@ import com.foundryos.app.data.AgyAuthState
 import com.foundryos.app.data.AgyCliStatus
 import com.foundryos.app.data.AgyModelInfo
 import com.foundryos.app.data.AgyQuotaGroup
+import com.foundryos.app.data.AppUpdateInfo
 import com.foundryos.app.data.ArtifactItem
 import com.foundryos.app.data.CompanyProposalData
 import com.foundryos.app.data.ConnectorItem
@@ -270,6 +272,10 @@ fun SettingsDialog(
     agyQuotaGroups: List<AgyQuotaGroup>,
     agyBusyLabel: String?,
     agyInstallProgress: Float?,
+    appVersion: String,
+    updateInfo: AppUpdateInfo?,
+    updateProgress: Float?,
+    updateStatusLabel: String?,
     plugins: List<PluginStatus>,
     providers: List<ProviderStatus>,
     connectors: List<ConnectorItem>,
@@ -295,6 +301,8 @@ fun SettingsDialog(
     onSavePluginToken: (String, String) -> Unit,
     onSavePluginClientId: (String, String) -> Unit,
     onDisconnectPlugin: (String) -> Unit,
+    onCheckAppUpdate: () -> Unit,
+    onInstallAppUpdate: (String) -> Unit,
     onAddCustomProvider: (String, String, String) -> String,
     onDeleteCustomProvider: (String) -> Unit,
     onFetchModels: (String, String) -> Unit,
@@ -1433,6 +1441,94 @@ fun SettingsDialog(
                         }
                     }
                     Switch(checked = killSwitch, onCheckedChange = onToggleKillSwitch)
+                }
+            }
+
+            Spacer(Modifier.height(10.dp))
+
+            // === 6. APP UPDATES & PERSISTENT SIGNATURE (IN-APP SELF-UPDATER) ===
+            var expandUpdatesSection by remember(updateInfo?.hasUpdate) { mutableStateOf(updateInfo?.hasUpdate == true) }
+            CollapsibleSectionHeader(
+                title = "App Updates (v$appVersion)",
+                subtitle = if (updateInfo?.hasUpdate == true) "New version v${updateInfo.latestVersion} available!" else "Persistent signature · In-app APK installer",
+                badgeText = if (updateInfo?.hasUpdate == true) "v${updateInfo.latestVersion} ready" else "Up to date",
+                badgeBg = if (updateInfo?.hasUpdate == true) FoundryColors.GreenBg else Color.White,
+                badgeInk = if (updateInfo?.hasUpdate == true) FoundryColors.GreenInk else FoundryColors.InkSecondary,
+                expanded = expandUpdatesSection,
+                onToggle = { expandUpdatesSection = !expandUpdatesSection },
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 8.dp)
+                        .clip(RoundedCornerShape(14.dp))
+                        .background(Color.White)
+                        .border(1.dp, FoundryColors.Border, RoundedCornerShape(14.dp))
+                        .padding(12.dp),
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Rounded.SystemUpdate, contentDescription = null, tint = FoundryColors.InkPrimary, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(7.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text("Installed: v$appVersion · Signed Release Keystore", fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = FoundryColors.InkPrimary)
+                            Text(
+                                text = when {
+                                    updateInfo?.error?.isNotBlank() == true -> updateInfo.error
+                                    updateInfo?.hasUpdate == true -> "New release v${updateInfo.latestVersion} (${(updateInfo.sizeBytes / (1024 * 1024)).coerceAtLeast(1)} MB) ready to install."
+                                    else -> "Updates install directly over CEO without losing sandboxes or accounts."
+                                },
+                                fontSize = 11.sp,
+                                color = if (updateInfo?.hasUpdate == true) FoundryColors.GreenInk else FoundryColors.InkSecondary,
+                            )
+                        }
+                    }
+
+                    if (!updateStatusLabel.isNullOrBlank()) {
+                        Spacer(Modifier.height(8.dp))
+                        Text(updateStatusLabel, fontSize = 11.5.sp, color = FoundryColors.BlueInk, fontWeight = FontWeight.Medium)
+                        if (updateProgress != null && updateProgress > 0f) {
+                            Spacer(Modifier.height(4.dp))
+                            LinearProgressIndicator(
+                                progress = { updateProgress.coerceIn(0f, 1f) },
+                                modifier = Modifier.fillMaxWidth().height(4.dp).clip(RoundedCornerShape(999.dp)),
+                                color = FoundryColors.InkPrimary,
+                                trackColor = FoundryColors.SoftSurface,
+                            )
+                        }
+                    }
+
+                    Spacer(Modifier.height(10.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .weight(1f)
+                                .heightIn(min = 40.dp)
+                                .clip(RoundedCornerShape(999.dp))
+                                .background(FoundryColors.SoftSurface)
+                                .clickable(enabled = updateStatusLabel == null) { onCheckAppUpdate() }
+                                .padding(horizontal = 12.dp, vertical = 9.dp),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Text("Check Updates", fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = FoundryColors.InkPrimary, maxLines = 1, softWrap = false)
+                        }
+                        if (updateInfo?.hasUpdate == true && updateInfo.downloadUrl.isNotBlank()) {
+                            Box(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .heightIn(min = 40.dp)
+                                    .clip(RoundedCornerShape(999.dp))
+                                    .background(FoundryColors.InkPrimary)
+                                    .clickable(enabled = updateStatusLabel == null) { onInstallAppUpdate(updateInfo.downloadUrl) }
+                                    .padding(horizontal = 12.dp, vertical = 9.dp),
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                Text("Install v${updateInfo.latestVersion}", fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = Color.White, maxLines = 1, softWrap = false)
+                            }
+                        }
+                    }
                 }
             }
         }

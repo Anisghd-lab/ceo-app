@@ -14,6 +14,7 @@ import com.foundryos.app.engine.OnDeviceSandbox
 import com.foundryos.app.plugins.PluginAuthManager
 import com.foundryos.app.plugins.PluginLoginLaunch
 import com.foundryos.app.plugins.PluginToolExecutor
+import com.foundryos.app.updater.AppUpdateManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -42,6 +43,7 @@ class FoundryRepository(private val context: Context) {
     private val agy = agyManager(context)
     private val pluginAuth = PluginAuthManager(context.applicationContext)
     private val pluginExecutor = PluginToolExecutor(context.applicationContext, pluginAuth, sandbox)
+    private val updater = AppUpdateManager(context.applicationContext)
     private val engine = AutonomousEngine(context, db, sandbox, llm, agy, pluginAuth, pluginExecutor)
 
     fun engineStatus(): Pair<Boolean, String> {
@@ -296,6 +298,15 @@ class FoundryRepository(private val context: Context) {
     ): PluginLoginLaunch = pluginAuth.beginConnectInBrowser(pluginId, onOAuthCompleted)
 
     fun syncBrowserCookiesForUrl(url: String): Boolean = pluginAuth.syncBrowserCookiesForUrl(url)
+
+    fun currentAppVersion(): String = updater.currentVersionName()
+
+    suspend fun checkForAppUpdate(): AppUpdateInfo = updater.checkForUpdate()
+
+    suspend fun downloadAndInstallUpdate(
+        downloadUrl: String,
+        onProgress: suspend (Float, String) -> Unit = { _, _ -> },
+    ): Pair<Boolean, String> = updater.downloadAndInstall(downloadUrl, onProgress)
 
     var killSwitch: Boolean
         get() = engine.killSwitch

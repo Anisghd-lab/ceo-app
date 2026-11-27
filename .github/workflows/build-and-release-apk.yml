@@ -7,9 +7,9 @@ on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: 'Release tag (e.g. v0.4.1)'
+        description: 'Release tag (e.g. v0.5.0)'
         required: false
-        default: 'v0.4.1'
+        default: 'v0.5.0'
 
 permissions:
   contents: write
@@ -50,9 +50,18 @@ jobs:
         with:
           gradle-version: '8.9'
 
-      - name: Compile Debug APK
+      - name: Compile Debug APK (Persistent Signature)
         working-directory: android
+        env:
+          ANDROID_KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: |
+          if [ -n "$ANDROID_KEYSTORE_B64" ]; then
+            printf '%s' "$ANDROID_KEYSTORE_B64" | base64 -d > "${{ runner.temp }}/ceo-release.jks"
+            export ANDROID_KEYSTORE_PATH="${{ runner.temp }}/ceo-release.jks"
+          fi
           gradle assembleDebug --no-daemon
           ls -lh app/build/outputs/apk/debug/app-debug.apk
           sha256sum app/build/outputs/apk/debug/app-debug.apk | tee apk.sha256
@@ -72,7 +81,7 @@ jobs:
             if [[ "${{ github.ref }}" == refs/tags/* ]]; then
               TAG="${{ github.ref_name }}"
             else
-              TAG="v0.4.1"
+              TAG="v0.5.0"
             fi
           fi
 

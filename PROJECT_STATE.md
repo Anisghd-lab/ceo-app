@@ -15,7 +15,10 @@
   - `PluginToolExecutor.kt` : exécution directe des outils lecture/recherche/prototypage HTML, et verrou d'approbation humaine (`Ship / Not yet`) pour toute action d'écriture externe (Slack, Gmail, GitHub Issue, Notion Page, Drive Upload).
 - [x] **Agents Hyper-Agentic (`AutonomousEngine.kt`)** :
   - Raisonnement réel du CEO via `agy CLI` dès qu'on clique sur CEO (`runCeoReasoningTurn`) + boucle multi-étapes ReAct à 6 pas sur le CEO et tous les bots (`runDirectBotChat`, `runFullMission`), avec cycle de révision automatique QA → Creator si score `< 70`.
-- [x] **UI Corrigée & Navigateur In-App** (`MainApp.kt`, `Sheets.kt`, `InAppBrowserDialog.kt`).
+- [x] **Signature Persistante & Auto-Updater In-App (`AppUpdateManager.kt`, CI Secrets)** :
+  - Keystore RSA 2048-bit persistant stocké dans les Secrets GitHub (`ANDROID_KEYSTORE_BASE64`) pour que toutes les futures versions gardent exactement la même signature Android (mises à jour sur place sans désinstaller ni perdre les sandboxes/comptes).
+  - Auto-vérification des Releases GitHub + téléchargement APK signé + lancement natif de l'installeur Android depuis Settings → App Updates.
+- [x] **UI Corrigée, Sections Collapsables & Navigateur In-App** (`MainApp.kt`, `Sheets.kt`, `InAppBrowserDialog.kt`).
 - [x] **Backend Python (`backend/`)** : 5/5 tests `pytest` verts sur CI.
 
 ## 3. Lacunes, Dettes Techniques & Points de Vigilance

@@ -138,6 +138,52 @@ class AgyRuntimeManager(private val context: Context) {
         }
     }
 
+    private fun ensureAndroidCaBundleFile(home: File): File? {
+        val bundle = File(home, ".gemini/android-ca-bundle.crt")
+        if (bundle.exists() && bundle.length() > 10_000L) return bundle
+        val sysDir = File("/system/etc/security/cacerts")
+        if (!sysDir.exists() || !sysDir.isDirectory) return null
+        return runCatching {
+            bundle.parentFile?.mkdirs()
+            val files = sysDir.listFiles()?.filter { it.isFile } ?: emptyList()
+            if (files.isEmpty()) return null
+            bundle.bufferedWriter(Charsets.UTF_8).use { writer ->
+                for (f in files) {
+                    val content = runCatching { f.readText(Charsets.UTF_8) }.getOrNull() ?: continue
+                    val idx = content.indexOf("-----BEGIN CERTIFICATE-----")
+                    if (idx >= 0) {
+                        val end = content.indexOf("-----END CERTIFICATE-----", idx)
+                        if (end > idx) {
+                            writer.write(content.substring(idx, end + "-----END CERTIFICATE-----".length))
+                            writer.newLine()
+                        }
+                    }
+                }
+            }
+            if (bundle.length() > 1024L) bundle else null
+        }.getOrNull()
+    }
+
+    private fun applyAgyEnv(env: MutableMap<String, String>, home: File, forHub: Boolean = false) {
+        env["HOME"] = home.absolutePath
+        env["USERPROFILE"] = home.absolutePath
+        env["CI"] = "1"
+        env["AGY_NO_UPDATE_PROMPT"] = "1"
+        env["AGY_CLI_DISABLE_AUTO_UPDATE"] = "1"
+        val sysCaDir = File("/system/etc/security/cacerts")
+        if (sysCaDir.exists()) {
+            env["SSL_CERT_DIR"] = sysCaDir.absolutePath
+        }
+        ensureAndroidCaBundleFile(home)?.let { caFile ->
+            env["SSL_CERT_FILE"] = caFile.absolutePath
+        }
+        if (forHub) {
+            env["AGY_ENABLE_HUB"] = "1"
+            env["ANTIGRAVITY_VSCODE_HOST"] = "1"
+            env["ANTIGRAVITY_AUTH_SUCCESS_APP"] = "vscode"
+        }
+    }
+
     suspend fun ensureHubRunning(sandboxesDir: File): Boolean = withContext(Dispatchers.IO) {
         if (!installer.isInstalled()) return@withContext false
         if (isHubPortOpen()) {
@@ -164,16 +210,7 @@ class AgyRuntimeManager(private val context: Context) {
         )
         val pb = ProcessBuilder(cmd)
         pb.directory(home)
-        pb.environment().apply {
-            put("HOME", home.absolutePath)
-            put("USERPROFILE", home.absolutePath)
-            put("AGY_ENABLE_HUB", "1")
-            put("ANTIGRAVITY_VSCODE_HOST", "1")
-            put("ANTIGRAVITY_AUTH_SUCCESS_APP", "vscode")
-            put("CI", "1")
-            put("AGY_NO_UPDATE_PROMPT", "1")
-            put("AGY_CLI_DISABLE_AUTO_UPDATE", "1")
-        }
+        applyAgyEnv(pb.environment(), home, forHub = true)
 
         return@withContext try {
             val proc = pb.start()
@@ -461,8 +498,10 @@ class AgyRuntimeManager(private val context: Context) {
 
     private fun fetchModelsViaCli(): List<AgyModelInfo> {
         return runCatching {
+            accounts.ensureTokensSynced()
+            val home = installer.homeDir()
             val pb = ProcessBuilder(installer.agyBinary().absolutePath, "models")
-            pb.environment()["HOME"] = installer.homeDir().absolutePath
+            applyAgyEnv(pb.environment(), home, forHub = false)
             val proc = pb.start()
             val out = proc.inputStream.bufferedReader().readText()
             proc.waitFor(15, TimeUnit.SECONDS)
@@ -486,9 +525,12 @@ class AgyRuntimeManager(private val context: Context) {
     ): Pair<Boolean, String> = runMutex.withLock {
         withContext(Dispatchers.IO) {
             if (!installer.isInstalled()) return@withContext false to "Antigravity CLI not installed"
-            if (accounts.readLiveToken() == null) return@withContext false to "Not signed in to Google on Antigravity"
+            if (!accounts.ensureTokensSynced() && accounts.readLiveToken() == null) {
+                return@withContext false to "Not signed in to Google on Antigravity"
+            }
 
             sandboxDir.mkdirs()
+            val home = installer.homeDir()
             val chosenModel = modelId.ifBlank { selectedModel }
             val cmd = mutableListOf(
                 installer.agyBinary().absolutePath,
@@ -507,13 +549,7 @@ class AgyRuntimeManager(private val context: Context) {
 
             val pb = ProcessBuilder(cmd)
             pb.directory(sandboxDir)
-            pb.environment().apply {
-                put("HOME", installer.homeDir().absolutePath)
-                put("USERPROFILE", installer.homeDir().absolutePath)
-                put("CI", "1")
-                put("AGY_NO_UPDATE_PROMPT", "1")
-                put("AGY_CLI_DISABLE_AUTO_UPDATE", "1")
-            }
+            applyAgyEnv(pb.environment(), home, forHub = false)
 
             val streamedResponse = StringBuilder()
             val nonJsonFallback = StringBuilder()

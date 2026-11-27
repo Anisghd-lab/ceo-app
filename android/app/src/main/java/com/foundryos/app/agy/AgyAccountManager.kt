@@ -14,11 +14,14 @@ import java.io.File
  */
 class AgyAccountManager(private val homeDir: File) {
     private val geminiDir = File(homeDir, ".gemini")
+    private val cliDataDir = File(geminiDir, "antigravity-cli")
     private val liveTokenFile = File(geminiDir, "jetski-standalone-oauth-token")
+    private val cliTokenFile = File(cliDataDir, "antigravity-oauth-token")
     private val accountsDir = File(geminiDir, "ceo-accounts")
 
     private fun ensureDirs() {
         geminiDir.mkdirs()
+        cliDataDir.mkdirs()
         accountsDir.mkdirs()
     }
 
@@ -58,12 +61,42 @@ class AgyAccountManager(private val homeDir: File) {
         target.setWritable(true, true)
     }
 
-    fun readLiveToken(): JSONObject? {
-        if (!liveTokenFile.exists()) return null
-        val text = runCatching { liveTokenFile.readText(Charsets.UTF_8) }.getOrNull() ?: return null
+    private fun readValidTokenFrom(file: File): JSONObject? {
+        if (!file.exists()) return null
+        val text = runCatching { file.readText(Charsets.UTF_8) }.getOrNull() ?: return null
         if (text.isBlank()) return null
         val obj = runCatching { JSONObject(text) }.getOrNull() ?: return null
         return if (tokenKey(obj).isNotBlank()) obj else null
+    }
+
+    fun readLiveToken(): JSONObject? {
+        val fromJetski = readValidTokenFrom(liveTokenFile)
+        val fromCli = readValidTokenFrom(cliTokenFile)
+        if (fromJetski != null && fromCli == null) {
+            runCatching { writeAtomic(cliTokenFile, cleanToken(fromJetski).toString()) }
+        } else if (fromCli != null && fromJetski == null) {
+            runCatching { writeAtomic(liveTokenFile, cleanToken(fromCli).toString()) }
+        }
+        return fromJetski ?: fromCli
+    }
+
+    /**
+     * Ensures both `jetski-standalone-oauth-token` (agy --hub) and
+     * `antigravity-cli/antigravity-oauth-token` (agy -p / agy models) contain the active OAuth token.
+     */
+    @Synchronized
+    fun ensureTokensSynced(): Boolean {
+        val live = readValidTokenFrom(liveTokenFile)
+        val cli = readValidTokenFrom(cliTokenFile)
+        val chosen = live ?: cli ?: return false
+        val cleaned = cleanToken(chosen).toString()
+        if (live == null || tokenKey(live) != tokenKey(chosen)) {
+            writeAtomic(liveTokenFile, cleaned)
+        }
+        if (cli == null || tokenKey(cli) != tokenKey(chosen)) {
+            writeAtomic(cliTokenFile, cleaned)
+        }
+        return true
     }
 
     fun liveEmail(): String = emailOf(readLiveToken())
@@ -152,14 +185,16 @@ class AgyAccountManager(private val homeDir: File) {
             ?: return false to "Corrupted saved account file"
         val tok = obj.optJSONObject("token") ?: return false to "Missing token in saved account"
 
-        writeAtomic(liveTokenFile, cleanToken(tok).toString())
+        val cleanedStr = cleanToken(tok).toString()
+        writeAtomic(liveTokenFile, cleanedStr)
+        writeAtomic(cliTokenFile, cleanedStr)
         obj.put("usedAt", System.currentTimeMillis())
         writeAtomic(targetFile, obj.toString(2))
         return true to "Switched to $email"
     }
 
     /**
-     * Clears ONLY the local live login file (without calling AuthLogout, so saved refresh tokens stay valid)
+     * Clears ONLY the local live login files (without calling AuthLogout, so saved refresh tokens stay valid)
      * so the user can sign in with another Google account.
      */
     @Synchronized
@@ -169,6 +204,9 @@ class AgyAccountManager(private val homeDir: File) {
         }
         if (liveTokenFile.exists()) {
             liveTokenFile.delete()
+        }
+        if (cliTokenFile.exists()) {
+            cliTokenFile.delete()
         }
         return true to "Ready to sign in with another Google account"
     }

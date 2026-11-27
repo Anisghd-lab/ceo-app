@@ -101,7 +101,7 @@ class AutonomousEngine(
                 )
             }
             if (!llm.hasAnyKey()) {
-                return LLMCallResult(ok = false, error = output.ifBlank { "Antigravity CLI failed" })
+                return LLMCallResult(ok = false, provider = "antigravity", error = output.ifBlank { "Antigravity CLI failed" })
             }
         }
         return llm.complete(

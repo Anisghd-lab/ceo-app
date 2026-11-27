@@ -9,7 +9,7 @@
 - [x] **Kernel Backend (`backend/`)** : FastAPI, SQLite WAL, `SandboxManager` (isolation + nettoyage env + E2B optionnel), `MemoryEngine` (Core blocks + FTS5), `MultiLLMRouter`, `ToolRegistry` (7 primitives atomiques), `GenericAgentRunner`, `CEOArchitect` (spawner dynamique), `ApprovalGate` (verrouillage optimiste idempotent).
 - [x] **Validation Backend (`pytest`)** : 5/5 tests passés (isolation inter-sandboxes, filtrage secrets hôtes, génération PDF + preview PNG + QA, stress test concurrence 10x idempotence, Kill Switch & REST API).
 - [x] **Application Android Native (`android/`)** : Kotlin + Jetpack Compose + Material 3, mascottes géométriques Canvas, rail rétractable, 4 cartes fidèles à la vidéo, dialogs Création libre / Livrables / Réglages Multi-LLM & Connecteurs, notifications actionnables `Ship` / `Not yet`.
-- [ ] **Compilation APK & GitHub Release** : en cours de compilation et publication.
+- [x] **Compilation APK & GitHub Release** : compilé exclusivement sur GitHub Actions (`run 45931352601`, `ubuntu-latest`) et publié sous le tag `v0.1.0` (`Anisghd-lab/ceo-app`).
 
 ## 3. Lacunes, Dettes Techniques & Points de Vigilance
 - Le mode `sandbox_exec` local utilise un sous-processus à environnement blanchi (pas de conteneur Docker sur PRoot ARM64) ; activer une clé **E2B** est recommandé pour exécuter du code tiers non fiable en production.

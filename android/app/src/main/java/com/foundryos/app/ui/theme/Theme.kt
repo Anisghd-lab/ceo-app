@@ -27,6 +27,8 @@ object FoundryColors {
     val RedInk = Color(0xFFDC2626)
     val RedBg = Color(0xFFFEF2F2)
     val AmberInk = Color(0xFFD97706)
+    val BlueBg = Color(0xFFEFF6FF)
+    val BlueInk = Color(0xFF1D4ED8)
 }
 
 private val LightColors = lightColorScheme(

@@ -916,8 +916,8 @@ fun FoundryMainScreen(repo: FoundryRepository) {
                     agyBusyLabel = "Preparing Antigravity CLI download..."
                     agyInstallProgress = 0f
                     val (ok, msg) = repo.installOrUpdateAgy { p ->
-                        agyBusyLabel = p.message
-                        agyInstallProgress = if (p.totalBytes > 0L) p.fraction else null
+                        agyBusyLabel = p.detail
+                        agyInstallProgress = p.progress.takeIf { it > 0f }
                     }
                     agyInstallProgress = null
                     agyBusyLabel = if (ok) "Starting Antigravity Hub..." else null
@@ -965,7 +965,7 @@ fun FoundryMainScreen(repo: FoundryRepository) {
                 }
             },
             onAgySaveAccount = {
-                val (_, msg) = repo.saveCurrentAgyAccount(agyAuthState.activeEmail)
+                val (_, msg) = repo.saveCurrentAgyAccount(agyAuthState.email)
                 Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
                 scope.launch { refreshAgyState(fetchQuotas = false) }
             },

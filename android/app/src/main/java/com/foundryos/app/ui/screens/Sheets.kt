@@ -388,7 +388,7 @@ fun SettingsDialog(
                             Text("Antigravity CLI (On-Device)", style = MaterialTheme.typography.titleMedium)
                             Text(
                                 text = when {
-                                    !agyCliStatus.supported -> "ARM64 Android required"
+                                    !agyCliStatus.supportedAbi -> "ARM64 Android required"
                                     agyCliStatus.installed -> "Installed · ${agyCliStatus.version.ifBlank { "ready" }}"
                                     else -> "Not installed (~native binary, 0 Termux)"
                                 },
@@ -403,7 +403,7 @@ fun SettingsDialog(
                             .heightIn(min = 38.dp)
                             .clip(RoundedCornerShape(999.dp))
                             .background(if (agyBusyLabel != null) FoundryColors.SoftSurface else FoundryColors.InkPrimary)
-                            .clickable(enabled = agyCliStatus.supported && agyBusyLabel == null) { onInstallOrUpdateAgy() }
+                            .clickable(enabled = agyCliStatus.supportedAbi && agyBusyLabel == null) { onInstallOrUpdateAgy() }
                             .padding(horizontal = 12.dp, vertical = 8.dp),
                         contentAlignment = Alignment.Center,
                     ) {
@@ -478,7 +478,7 @@ fun SettingsDialog(
                             Icon(Icons.Rounded.AccountCircle, contentDescription = null, tint = FoundryColors.InkPrimary, modifier = Modifier.size(17.dp))
                             Spacer(Modifier.width(6.dp))
                             Text(
-                                text = if (agyAuthState.signedIn) agyAuthState.activeEmail.ifBlank { "Google Account Active" }
+                                text = if (agyAuthState.signedIn) agyAuthState.email.ifBlank { "Google Account Active" }
                                 else "No Google account connected",
                                 fontSize = 12.5.sp,
                                 fontWeight = FontWeight.SemiBold,
@@ -525,7 +525,7 @@ fun SettingsDialog(
                                     Text("+ Google Account", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, softWrap = false)
                                 }
                             }
-                            if (!agyAuthState.isSaved) {
+                            if (!agyAuthState.currentSaved) {
                                 Box(
                                     modifier = Modifier
                                         .heightIn(min = 38.dp)
@@ -558,9 +558,9 @@ fun SettingsDialog(
                         }
                     }
 
-                    if (agyAuthState.savedAccounts.isNotEmpty()) {
+                    if (agyAuthState.accounts.isNotEmpty()) {
                         Spacer(Modifier.height(8.dp))
-                        Text("Saved Google Accounts (${agyAuthState.savedAccounts.size})", fontSize = 11.5.sp, fontWeight = FontWeight.SemiBold, color = FoundryColors.InkSecondary)
+                        Text("Saved Google Accounts (${agyAuthState.accounts.size})", fontSize = 11.5.sp, fontWeight = FontWeight.SemiBold, color = FoundryColors.InkSecondary)
                         Spacer(Modifier.height(4.dp))
                         Column(
                             modifier = Modifier
@@ -569,7 +569,7 @@ fun SettingsDialog(
                                 .background(Color.White)
                                 .border(1.dp, FoundryColors.Border, RoundedCornerShape(12.dp)),
                         ) {
-                            agyAuthState.savedAccounts.forEachIndexed { idx, acc ->
+                            agyAuthState.accounts.forEachIndexed { idx, acc ->
                                 Row(
                                     modifier = Modifier
                                         .fillMaxWidth()
@@ -580,14 +580,14 @@ fun SettingsDialog(
                                     Column(modifier = Modifier.weight(1f)) {
                                         Text(acc.email, fontSize = 12.sp, fontWeight = FontWeight.Medium, color = FoundryColors.InkPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis)
                                         Text(
-                                            if (acc.isCurrent) "Active session" else acc.authMethod,
+                                            if (acc.active) "Active session" else acc.authMethod,
                                             fontSize = 10.5.sp,
-                                            color = if (acc.isCurrent) FoundryColors.GreenInk else FoundryColors.InkMuted,
+                                            color = if (acc.active) FoundryColors.GreenInk else FoundryColors.InkMuted,
                                         )
                                     }
                                     Spacer(Modifier.width(6.dp))
                                     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                                        if (acc.isCurrent) {
+                                        if (acc.active) {
                                             Text(
                                                 "Active",
                                                 fontSize = 11.sp,
@@ -625,7 +625,7 @@ fun SettingsDialog(
                                         }
                                     }
                                 }
-                                if (idx < agyAuthState.savedAccounts.lastIndex) {
+                                if (idx < agyAuthState.accounts.lastIndex) {
                                     HorizontalDivider(color = FoundryColors.Border, thickness = 0.5.dp)
                                 }
                             }
@@ -647,31 +647,34 @@ fun SettingsDialog(
                             verticalArrangement = Arrangement.spacedBy(8.dp),
                         ) {
                             agyQuotaGroups.forEach { group ->
-                                Text(group.label, fontSize = 11.5.sp, fontWeight = FontWeight.SemiBold, color = FoundryColors.InkPrimary)
-                                group.buckets.forEach { b ->
-                                    val pct = (b.remainingFraction.coerceIn(0.0, 1.0) * 100).toInt()
-                                    val barColor = when {
-                                        pct >= 40 -> FoundryColors.GreenInk
-                                        pct >= 15 -> FoundryColors.AmberInk
-                                        else -> FoundryColors.RedInk
-                                    }
-                                    Column {
-                                        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                                            Text(b.window, fontSize = 11.sp, color = FoundryColors.InkSecondary)
-                                            Text(
-                                                text = if (b.resetLabel.isNotBlank()) "$pct% · ${b.resetLabel}" else "$pct%",
-                                                fontSize = 11.sp,
-                                                fontWeight = FontWeight.SemiBold,
+                                val buckets = listOfNotNull(group.fiveHour, group.weekly)
+                                if (buckets.isNotEmpty()) {
+                                    Text(group.groupName, fontSize = 11.5.sp, fontWeight = FontWeight.SemiBold, color = FoundryColors.InkPrimary)
+                                    buckets.forEach { b ->
+                                        val pct = (b.remainingFraction.coerceIn(0f, 1f) * 100f).toInt()
+                                        val barColor = when {
+                                            pct >= 40 -> FoundryColors.GreenInk
+                                            pct >= 15 -> FoundryColors.AmberInk
+                                            else -> FoundryColors.RedInk
+                                        }
+                                        Column {
+                                            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                                                Text(b.displayName.ifBlank { b.window }, fontSize = 11.sp, color = FoundryColors.InkSecondary)
+                                                Text(
+                                                    text = if (b.countdown.isNotBlank()) "${b.remainingPct} · ${b.countdown}" else b.remainingPct,
+                                                    fontSize = 11.sp,
+                                                    fontWeight = FontWeight.SemiBold,
+                                                    color = barColor,
+                                                )
+                                            }
+                                            Spacer(Modifier.height(3.dp))
+                                            LinearProgressIndicator(
+                                                progress = { b.remainingFraction.coerceIn(0f, 1f) },
+                                                modifier = Modifier.fillMaxWidth().height(5.dp).clip(RoundedCornerShape(999.dp)),
                                                 color = barColor,
+                                                trackColor = FoundryColors.SoftSurface,
                                             )
                                         }
-                                        Spacer(Modifier.height(3.dp))
-                                        LinearProgressIndicator(
-                                            progress = { b.remainingFraction.toFloat().coerceIn(0f, 1f) },
-                                            modifier = Modifier.fillMaxWidth().height(5.dp).clip(RoundedCornerShape(999.dp)),
-                                            color = barColor,
-                                            trackColor = FoundryColors.SoftSurface,
-                                        )
                                     }
                                 }
                             }
@@ -692,7 +695,7 @@ fun SettingsDialog(
                         ) {
                             agyModels.forEachIndexed { idx, m ->
                                 val isChosen = m.id == agySelectedModel
-                                val qPct = m.remainingFraction?.let { (it.coerceIn(0.0, 1.0) * 100).toInt() }
+                                val qPct = m.remainingFraction?.let { (it.coerceIn(0f, 1f) * 100f).toInt() }
                                 val qColor = when {
                                     qPct == null -> FoundryColors.InkSecondary
                                     qPct >= 40 -> FoundryColors.GreenInk
@@ -734,7 +737,7 @@ fun SettingsDialog(
                                     Spacer(Modifier.width(8.dp))
                                     Text(
                                         text = when {
-                                            qPct != null && m.resetLabel.isNotBlank() -> "$qPct% · ${m.resetLabel}"
+                                            qPct != null && m.resetCountdown.isNotBlank() -> "$qPct% · ${m.resetCountdown}"
                                             qPct != null -> "$qPct%"
                                             else -> "Ready"
                                         },

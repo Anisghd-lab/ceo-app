@@ -64,7 +64,7 @@ class AutonomousEngine(
         jsonMode: Boolean = false,
         maxTokens: Int = 1800,
         onStatus: suspend (String) -> Unit = {},
-    ): LLMResponse {
+    ): LLMCallResult {
         if (canUseAgyEngine()) {
             val runtime = agy!!
             val targetDir = sandboxDir ?: runtime.installer.homeDir()
@@ -88,7 +88,7 @@ class AutonomousEngine(
                 onStatus = onStatus,
             )
             if (ok && output.isNotBlank()) {
-                return LLMResponse(
+                return LLMCallResult(
                     ok = true,
                     content = output,
                     provider = "antigravity",
@@ -97,7 +97,7 @@ class AutonomousEngine(
                 )
             }
             if (!llm.hasAnyKey()) {
-                return LLMResponse(ok = false, error = output.ifBlank { "Antigravity CLI failed" })
+                return LLMCallResult(ok = false, error = output.ifBlank { "Antigravity CLI failed" })
             }
         }
         return llm.complete(

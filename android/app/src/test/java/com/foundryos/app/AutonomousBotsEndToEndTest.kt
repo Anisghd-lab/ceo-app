@@ -176,12 +176,12 @@ class AutonomousBotsEndToEndTest {
         aiServer.enqueue(openAiWrap("""{"action":"tool","tool":"create_pdf","args":{"filename":"q4_seo_audit.pdf","title":"Q4 SEO Audit","subtitle":"NovaSEO Autonomous Report","sections":[{"heading":"Market Insights","body":"Technical SEO 2026 findings incorporated cleanly."},{"heading":"GitHub Audit","body":"Inspected repository founder-gh/seo-core with connected GitHub plugin."}]}}"""))
         aiServer.enqueue(openAiWrap("""{"action":"final","summary":"Q4 SEO Audit PDF created cleanly.","primary_rel_path":"output/q4_seo_audit.pdf"}"""))
 
-        // 4) Publisher (non-Strategist, non-Builder specialist!) calls product_design_prototype, then reports to CEO
+        // Stage 3: Quality Auditor audits deliverable before post-QA Publisher stage
+        aiServer.enqueue(openAiWrap("""{"passed":true,"score":95,"report":"PDF valide et prêt pour la suite marketing."}"""))
+
+        // Stage 4: Publisher calls product_design_prototype after QA, then reports to CEO
         aiServer.enqueue(openAiWrap("""{"action":"tool","tool":"product_design_prototype","args":{"filename":"seo_dashboard.html","title":"NovaSEO Dashboard","summary":"Interactive HTML showcase synced with Q4 SEO Audit."}}"""))
         aiServer.enqueue(openAiWrap("""{"action":"final","reply":"Prototype HTML interactif créé dans output/seo_dashboard.html prêt pour publication."}"""))
-
-        // 5) Quality Auditor audits deliverable
-        aiServer.enqueue(openAiWrap("""{"passed":true,"score":95,"report":"PDF valide et prototype HTML vérifiés dans la sandbox."}"""))
 
         // Run CEO + entire autonomous bot pipeline!
         engine.handleFounderMessage(deployed.id, "Lance un audit SEO Q4 complet avec nos plugins")

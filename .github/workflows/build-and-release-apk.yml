@@ -79,14 +79,7 @@ jobs:
           SIZE="$(du -h "$APK_PATH" | awk '{print $1}')"
           ASSET_NAME="ceo-${TAG}-debug.apk"
 
-          NOTES="### CEO — Universal Autonomous Company OS (${TAG})
-
-- **Application Android Native** (\`CEO\`) fidèle à l'UI de la vidéo (rail latéral rétractable, mascottes géométriques à badges, cartes \`Company Org\`, \`Deliverable QA\`, \`Release Ship / Not yet\`, \`Board meeting\`, notifications Android actionnables)
-- **Universal Kernel** (\`1 Sandbox = 1 Entreprise\`, zéro métier hardcodé) : le CEO conçoit et déploie dynamiquement les bots après ta description libre
-- **Routeur Multi-LLM** (OpenRouter, Gemini, Anthropic, OpenAI, xAI Grok, DeepSeek, Groq) + **Approval Gate idempotent** + **Kill Switch Global**
-- **Taille APK** : \`${SIZE}\`
-- **SHA-256** : \`${SHA256}\`
-- **Compilé sur** : GitHub Actions (\`ubuntu-latest\`)"
+          NOTES="$(printf '### CEO — Universal Autonomous Company OS (%s)\n\n- **Application Android Native** (`CEO`) fidèle à l'\''UI de la vidéo (rail latéral rétractable, mascottes géométriques à badges, cartes `Company Org`, `Deliverable QA`, `Release Ship / Not yet`, `Board meeting`, notifications Android actionnables)\n- **Universal Kernel** (`1 Sandbox = 1 Entreprise`, zéro métier hardcodé) : le CEO conçoit et déploie dynamiquement les bots après ta description libre\n- **Routeur Multi-LLM** (OpenRouter, Gemini, Anthropic, OpenAI, xAI Grok, DeepSeek, Groq) + **Approval Gate idempotent** + **Kill Switch Global**\n- **Taille APK** : `%s`\n- **SHA-256** : `%s`\n- **Compilé sur** : GitHub Actions (`ubuntu-latest`)\n' "$TAG" "$SIZE" "$SHA256")"
 
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" "${APK_PATH}#${ASSET_NAME}" --clobber

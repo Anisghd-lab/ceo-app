@@ -754,7 +754,7 @@ class PluginToolExecutor(
         }
     }
 
-    private fun execTinyFish(args: JSONObject): PluginToolResult {
+    private suspend fun execTinyFish(args: JSONObject): PluginToolResult {
         val tok = auth.getAccessToken("tinyfish")
         val targetUrl = args.optString("url")
         if (tok.isBlank()) {

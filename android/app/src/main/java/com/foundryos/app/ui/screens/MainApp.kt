@@ -8,7 +8,12 @@ import android.os.Build
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateContentSize
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -53,6 +58,7 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.VerticalDivider
 import androidx.compose.runtime.Composable
@@ -255,7 +261,7 @@ fun FoundryMainScreen(repo: FoundryRepository) {
     val activeCompany = companies.firstOrNull { it.id == activeCompanyId }
     val headerBot = selectedBot ?: bots.firstOrNull { it.isCeo }
 
-    Row(
+    Box(
         modifier = Modifier
             .fillMaxSize()
             .background(FoundryColors.Canvas)
@@ -263,174 +269,17 @@ fun FoundryMainScreen(repo: FoundryRepository) {
             .navigationBarsPadding()
             .imePadding(),
     ) {
-        // === LEFT RAIL (Exact match to video) ===
-        Column(
-            modifier = Modifier
-                .fillMaxHeight()
-                .animateContentSize()
-                .width(if (sidebarExpanded) 218.dp else 64.dp)
-                .background(FoundryColors.SidebarBg)
-                .padding(vertical = 12.dp, horizontal = if (sidebarExpanded) 12.dp else 8.dp),
-            horizontalAlignment = if (sidebarExpanded) Alignment.Start else Alignment.CenterHorizontally,
-        ) {
-            if (sidebarExpanded) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Row(horizontalArrangement = Arrangement.spacedBy(5.dp)) {
-                        Box(Modifier.size(9.dp).background(Color(0xFFFF5F57), CircleShape))
-                        Box(Modifier.size(9.dp).background(Color(0xFFFEBC2E), CircleShape))
-                        Box(Modifier.size(9.dp).background(Color(0xFF28C840), CircleShape))
-                    }
-                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        Box(
-                            modifier = Modifier
-                                .size(30.dp)
-                                .clip(CircleShape)
-                                .background(Color.White)
-                                .border(1.dp, FoundryColors.Border, CircleShape)
-                                .clickable {
-                                    proposal = null
-                                    showCreateDialog = true
-                                },
-                            contentAlignment = Alignment.Center,
-                        ) {
-                            Icon(Icons.Rounded.Add, contentDescription = "New company", modifier = Modifier.size(16.dp))
-                        }
-                        Box(
-                            modifier = Modifier
-                                .size(30.dp)
-                                .clip(CircleShape)
-                                .background(Color.White)
-                                .border(1.dp, FoundryColors.Border, CircleShape)
-                                .clickable { sidebarExpanded = false },
-                            contentAlignment = Alignment.Center,
-                        ) {
-                            Icon(Icons.Rounded.ChevronLeft, contentDescription = "Collapse", modifier = Modifier.size(16.dp))
-                        }
-                    }
-                }
-
-                Spacer(Modifier.height(14.dp))
-
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(104.dp)
-                        .clip(RoundedCornerShape(18.dp))
-                        .background(Color(0xFFEBEBED))
-                        .clickable {
-                            selectedBot = bots.firstOrNull { it.isCeo }
-                            sidebarExpanded = false
-                        },
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        BotMascot(shape = "circle", colorHex = "#111111", size = 46.dp)
-                        Spacer(Modifier.height(6.dp))
-                        Text("CEO", fontWeight = FontWeight.SemiBold, fontSize = 13.sp, color = FoundryColors.InkPrimary)
-                    }
-                }
-
-                Spacer(Modifier.height(12.dp))
-
-                Text(
-                    text = activeCompany?.name ?: "No company yet",
-                    fontWeight = FontWeight.Bold,
-                    fontSize = 14.sp,
-                    color = FoundryColors.InkPrimary,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-                Text(
-                    text = if (activeCompany != null) "1 human · ${bots.size} bots" else "Tap + to found one",
-                    fontSize = 11.5.sp,
-                    color = FoundryColors.InkSecondary,
-                )
-
-                Spacer(Modifier.height(10.dp))
-
-                LazyColumn(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    items(bots.filter { !it.isCeo }) { bot ->
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clip(RoundedCornerShape(12.dp))
-                                .background(if (selectedBot?.id == bot.id) Color.White else Color.Transparent)
-                                .clickable {
-                                    repo.clearBotUnread(bot.id)
-                                    selectedBot = bot
-                                    sidebarExpanded = false
-                                    refreshAll(activeCompanyId)
-                                }
-                                .padding(horizontal = 6.dp, vertical = 6.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            BotMascot(shape = bot.avatarShape, colorHex = bot.avatarColor, size = 30.dp)
-                            Spacer(Modifier.width(9.dp))
-                            Column(modifier = Modifier.weight(1f)) {
-                                Text(
-                                    bot.name,
-                                    fontSize = 12.5.sp,
-                                    fontWeight = FontWeight.SemiBold,
-                                    color = FoundryColors.InkPrimary,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis,
-                                )
-                                Text(
-                                    bot.statusText.ifBlank { bot.tagline },
-                                    fontSize = 11.sp,
-                                    color = FoundryColors.InkSecondary,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis,
-                                )
-                            }
-                        }
-                    }
-
-                    if (companies.size > 1) {
-                        item {
-                            Spacer(Modifier.height(8.dp))
-                            HorizontalDivider(color = FoundryColors.Border)
-                            Spacer(Modifier.height(8.dp))
-                            Text("Sandboxes (${companies.size})", fontSize = 11.sp, fontWeight = FontWeight.SemiBold, color = FoundryColors.InkMuted)
-                        }
-                        items(companies) { comp ->
-                            val active = comp.id == activeCompanyId
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .clip(RoundedCornerShape(10.dp))
-                                    .background(if (active) Color.White else Color.Transparent)
-                                    .border(if (active) 1.dp else 0.dp, if (active) FoundryColors.Border else Color.Transparent, RoundedCornerShape(10.dp))
-                                    .clickable {
-                                        selectedBot = null
-                                        refreshAll(comp.id)
-                                        sidebarExpanded = false
-                                    }
-                                    .padding(horizontal = 8.dp, vertical = 7.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                            ) {
-                                Box(
-                                    Modifier
-                                        .size(8.dp)
-                                        .background(if (active) FoundryColors.GreenSolid else FoundryColors.InkMuted, CircleShape)
-                                )
-                                Spacer(Modifier.width(8.dp))
-                                Text(
-                                    comp.name,
-                                    fontSize = 12.sp,
-                                    fontWeight = if (active) FontWeight.SemiBold else FontWeight.Normal,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis,
-                                )
-                            }
-                        }
-                    }
-                }
-            } else {
+        // === BASE LAYER: FIXED 64dp RAIL + FULL-WIDTH MAIN COCKPIT (Never crushes chat when drawer opens) ===
+        Row(modifier = Modifier.fillMaxSize()) {
+            // Collapsed 64dp Left Rail
+            Column(
+                modifier = Modifier
+                    .fillMaxHeight()
+                    .width(64.dp)
+                    .background(FoundryColors.SidebarBg)
+                    .padding(vertical = 12.dp, horizontal = 8.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
                 Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                     Box(Modifier.size(7.dp).background(Color(0xFFFF5F57), CircleShape))
                     Box(Modifier.size(7.dp).background(Color(0xFFFEBC2E), CircleShape))
@@ -492,86 +341,99 @@ fun FoundryMainScreen(repo: FoundryRepository) {
                     Icon(Icons.Rounded.Add, contentDescription = "New company", modifier = Modifier.size(18.dp))
                 }
             }
-        }
 
-        VerticalDivider(color = FoundryColors.Border, thickness = 0.8.dp)
+            VerticalDivider(color = FoundryColors.Border, thickness = 0.8.dp)
 
-        // === RIGHT MAIN COCKPIT ===
-        Column(modifier = Modifier.weight(1f).fillMaxHeight()) {
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 10.dp, vertical = 10.dp),
-            ) {
+            // === RIGHT MAIN COCKPIT ===
+            Column(modifier = Modifier.weight(1f).fillMaxHeight()) {
+                // Non-overlapping Top Bar: [Centered/Left-Weighted Bot Pill] + [Right Utility Icons]
                 Row(
                     modifier = Modifier
-                        .align(Alignment.Center)
-                        .clip(RoundedCornerShape(999.dp))
-                        .background(Color.White)
-                        .border(1.dp, FoundryColors.Border, RoundedCornerShape(999.dp))
-                        .clickable { sidebarExpanded = !sidebarExpanded }
-                        .padding(horizontal = 12.dp, vertical = 6.dp),
+                        .fillMaxWidth()
+                        .padding(horizontal = 10.dp, vertical = 10.dp),
                     verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween,
                 ) {
-                    BotMascot(
-                        shape = headerBot?.avatarShape ?: "circle",
-                        colorHex = headerBot?.avatarColor ?: "#111111",
-                        size = 20.dp,
-                    )
-                    Spacer(Modifier.width(7.dp))
-                    Text(
-                        text = headerBot?.name ?: "CEO",
-                        style = MaterialTheme.typography.titleMedium.copy(fontSize = 14.sp, fontWeight = FontWeight.SemiBold),
-                        color = FoundryColors.InkPrimary,
-                    )
-                }
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .padding(end = 6.dp),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(999.dp))
+                                .background(Color.White)
+                                .border(1.dp, FoundryColors.Border, RoundedCornerShape(999.dp))
+                                .clickable { sidebarExpanded = !sidebarExpanded }
+                                .padding(horizontal = 11.dp, vertical = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            BotMascot(
+                                shape = headerBot?.avatarShape ?: "circle",
+                                colorHex = headerBot?.avatarColor ?: "#111111",
+                                size = 20.dp,
+                            )
+                            Spacer(Modifier.width(7.dp))
+                            Text(
+                                text = headerBot?.name ?: "CEO",
+                                style = MaterialTheme.typography.titleMedium.copy(fontSize = 13.5.sp, fontWeight = FontWeight.SemiBold),
+                                color = FoundryColors.InkPrimary,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
+                    }
 
-                Row(modifier = Modifier.align(Alignment.CenterEnd), verticalAlignment = Alignment.CenterVertically) {
-                    if (activeCompany != null) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(2.dp),
+                    ) {
+                        if (activeCompany != null) {
+                            IconButton(
+                                onClick = {
+                                    repo.requestBoardMeeting(activeCompany.id)
+                                    refreshAll(activeCompany.id)
+                                },
+                                modifier = Modifier.size(32.dp),
+                            ) {
+                                Icon(Icons.Rounded.Assessment, contentDescription = "Board meeting", tint = FoundryColors.InkSecondary, modifier = Modifier.size(18.dp))
+                            }
+                            IconButton(
+                                onClick = { showArtifactsDialog = true },
+                                modifier = Modifier.size(32.dp),
+                            ) {
+                                Icon(Icons.Rounded.FolderOpen, contentDescription = "Deliverables", tint = FoundryColors.InkSecondary, modifier = Modifier.size(18.dp))
+                            }
+                        }
                         IconButton(
                             onClick = {
-                                repo.requestBoardMeeting(activeCompany.id)
-                                refreshAll(activeCompany.id)
+                                browserUrl = "https://www.google.com"
+                                browserIsOAuth = false
+                                showBrowserDialog = true
                             },
-                            modifier = Modifier.size(34.dp),
+                            modifier = Modifier.size(32.dp),
                         ) {
-                            Icon(Icons.Rounded.Assessment, contentDescription = "Board meeting", tint = FoundryColors.InkSecondary, modifier = Modifier.size(19.dp))
+                            Icon(
+                                Icons.Rounded.Public,
+                                contentDescription = "In-App Browser",
+                                tint = FoundryColors.InkSecondary,
+                                modifier = Modifier.size(18.dp),
+                            )
                         }
                         IconButton(
-                            onClick = { showArtifactsDialog = true },
-                            modifier = Modifier.size(34.dp),
+                            onClick = { showSettingsDialog = true },
+                            modifier = Modifier.size(32.dp),
                         ) {
-                            Icon(Icons.Rounded.FolderOpen, contentDescription = "Deliverables", tint = FoundryColors.InkSecondary, modifier = Modifier.size(19.dp))
+                            Icon(
+                                Icons.Rounded.Settings,
+                                contentDescription = "Settings",
+                                tint = if (hasAnyKey) FoundryColors.InkSecondary else FoundryColors.AmberInk,
+                                modifier = Modifier.size(18.dp),
+                            )
                         }
                     }
-                    IconButton(
-                        onClick = {
-                            browserUrl = "https://www.google.com"
-                            browserIsOAuth = false
-                            showBrowserDialog = true
-                        },
-                        modifier = Modifier.size(34.dp),
-                    ) {
-                        Icon(
-                            Icons.Rounded.Public,
-                            contentDescription = "In-App Browser",
-                            tint = FoundryColors.InkSecondary,
-                            modifier = Modifier.size(19.dp),
-                        )
-                    }
-                    IconButton(
-                        onClick = { showSettingsDialog = true },
-                        modifier = Modifier.size(34.dp),
-                    ) {
-                        Icon(
-                            Icons.Rounded.Settings,
-                            contentDescription = "Settings",
-                            tint = if (hasAnyKey) FoundryColors.InkSecondary else FoundryColors.AmberInk,
-                            modifier = Modifier.size(19.dp),
-                        )
-                    }
                 }
-            }
 
             if (activeCompany == null) {
                 Column(
@@ -769,6 +631,8 @@ fun FoundryMainScreen(repo: FoundryRepository) {
                                 text = if (activeCompany == null) "Describe a company to found..." else "Message ${headerBot?.name ?: "CEO"}",
                                 style = MaterialTheme.typography.bodyMedium,
                                 color = FoundryColors.InkMuted,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
                             )
                         }
                         BasicTextField(
@@ -842,6 +706,203 @@ fun FoundryMainScreen(repo: FoundryRepository) {
                             modifier = Modifier.size(18.dp),
                         )
                     }
+                }
+            }
+            }
+        }
+
+        // === OVERLAY EXPANDED SIDEBAR DRAWER (Preserves full chat width cleanly on mobile!) ===
+        AnimatedVisibility(
+            visible = sidebarExpanded,
+            enter = fadeIn(),
+            exit = fadeOut(),
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color.Black.copy(alpha = 0.22f))
+                    .clickable { sidebarExpanded = false },
+            )
+        }
+
+        AnimatedVisibility(
+            visible = sidebarExpanded,
+            enter = slideInHorizontally { -it },
+            exit = slideOutHorizontally { -it },
+        ) {
+            Surface(
+                shadowElevation = 10.dp,
+                color = FoundryColors.SidebarBg,
+                modifier = Modifier
+                    .fillMaxHeight()
+                    .width(248.dp),
+            ) {
+                Row(modifier = Modifier.fillMaxSize()) {
+                    Column(
+                        modifier = Modifier
+                            .weight(1f)
+                            .fillMaxHeight()
+                            .padding(vertical = 12.dp, horizontal = 12.dp),
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Row(horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+                                Box(Modifier.size(9.dp).background(Color(0xFFFF5F57), CircleShape))
+                                Box(Modifier.size(9.dp).background(Color(0xFFFEBC2E), CircleShape))
+                                Box(Modifier.size(9.dp).background(Color(0xFF28C840), CircleShape))
+                            }
+                            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(32.dp)
+                                        .clip(CircleShape)
+                                        .background(Color.White)
+                                        .border(1.dp, FoundryColors.Border, CircleShape)
+                                        .clickable {
+                                            sidebarExpanded = false
+                                            proposal = null
+                                            showCreateDialog = true
+                                        },
+                                    contentAlignment = Alignment.Center,
+                                ) {
+                                    Icon(Icons.Rounded.Add, contentDescription = "New company", modifier = Modifier.size(17.dp))
+                                }
+                                Box(
+                                    modifier = Modifier
+                                        .size(32.dp)
+                                        .clip(CircleShape)
+                                        .background(Color.White)
+                                        .border(1.dp, FoundryColors.Border, CircleShape)
+                                        .clickable { sidebarExpanded = false },
+                                    contentAlignment = Alignment.Center,
+                                ) {
+                                    Icon(Icons.Rounded.ChevronLeft, contentDescription = "Collapse", modifier = Modifier.size(17.dp))
+                                }
+                            }
+                        }
+
+                        Spacer(Modifier.height(14.dp))
+
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(104.dp)
+                                .clip(RoundedCornerShape(18.dp))
+                                .background(Color(0xFFEBEBED))
+                                .clickable {
+                                    selectedBot = bots.firstOrNull { it.isCeo }
+                                    sidebarExpanded = false
+                                },
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                BotMascot(shape = "circle", colorHex = "#111111", size = 46.dp)
+                                Spacer(Modifier.height(6.dp))
+                                Text("CEO", fontWeight = FontWeight.SemiBold, fontSize = 13.sp, color = FoundryColors.InkPrimary)
+                            }
+                        }
+
+                        Spacer(Modifier.height(12.dp))
+
+                        Text(
+                            text = activeCompany?.name ?: "No company yet",
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 14.sp,
+                            color = FoundryColors.InkPrimary,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                        Text(
+                            text = if (activeCompany != null) "1 human · ${bots.size} bots" else "Tap + to found one",
+                            fontSize = 11.5.sp,
+                            color = FoundryColors.InkSecondary,
+                        )
+
+                        Spacer(Modifier.height(10.dp))
+
+                        LazyColumn(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            items(bots.filter { !it.isCeo }) { bot ->
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clip(RoundedCornerShape(12.dp))
+                                        .background(if (selectedBot?.id == bot.id) Color.White else Color.Transparent)
+                                        .clickable {
+                                            repo.clearBotUnread(bot.id)
+                                            selectedBot = bot
+                                            sidebarExpanded = false
+                                            refreshAll(activeCompanyId)
+                                        }
+                                        .padding(horizontal = 8.dp, vertical = 7.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    BotMascot(shape = bot.avatarShape, colorHex = bot.avatarColor, size = 30.dp)
+                                    Spacer(Modifier.width(9.dp))
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(
+                                            bot.name,
+                                            fontSize = 12.5.sp,
+                                            fontWeight = FontWeight.SemiBold,
+                                            color = FoundryColors.InkPrimary,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
+                                        )
+                                        Text(
+                                            bot.statusText.ifBlank { bot.tagline },
+                                            fontSize = 11.sp,
+                                            color = FoundryColors.InkSecondary,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
+                                        )
+                                    }
+                                }
+                            }
+
+                            if (companies.size > 1) {
+                                item {
+                                    Spacer(Modifier.height(8.dp))
+                                    HorizontalDivider(color = FoundryColors.Border)
+                                    Spacer(Modifier.height(8.dp))
+                                    Text("Sandboxes (${companies.size})", fontSize = 11.sp, fontWeight = FontWeight.SemiBold, color = FoundryColors.InkMuted)
+                                }
+                                items(companies) { comp ->
+                                    val active = comp.id == activeCompanyId
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .clip(RoundedCornerShape(10.dp))
+                                            .background(if (active) Color.White else Color.Transparent)
+                                            .border(if (active) 1.dp else 0.dp, if (active) FoundryColors.Border else Color.Transparent, RoundedCornerShape(10.dp))
+                                            .clickable {
+                                                selectedBot = null
+                                                refreshAll(comp.id)
+                                                sidebarExpanded = false
+                                            }
+                                            .padding(horizontal = 8.dp, vertical = 7.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                    ) {
+                                        Box(
+                                            Modifier
+                                                .size(8.dp)
+                                                .background(if (active) FoundryColors.GreenSolid else FoundryColors.InkMuted, CircleShape)
+                                        )
+                                        Spacer(Modifier.width(8.dp))
+                                        Text(
+                                            comp.name,
+                                            fontSize = 12.sp,
+                                            fontWeight = if (active) FontWeight.SemiBold else FontWeight.Normal,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    VerticalDivider(color = FoundryColors.Border, thickness = 0.8.dp)
                 }
             }
         }

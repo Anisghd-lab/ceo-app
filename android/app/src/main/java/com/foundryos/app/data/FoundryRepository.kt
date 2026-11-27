@@ -7,6 +7,8 @@ import android.provider.OpenableColumns
 import androidx.core.content.FileProvider
 import com.foundryos.app.agy.AgyInstallProgress
 import com.foundryos.app.agy.AgyRuntimeManager
+import com.foundryos.app.data.BotLiveActivity
+import com.foundryos.app.data.LiveReasoningState
 import com.foundryos.app.engine.AutonomousEngine
 import com.foundryos.app.engine.LocalDatabase
 import com.foundryos.app.engine.OnDeviceLLMClient
@@ -298,6 +300,12 @@ class FoundryRepository(private val context: Context) {
     ): PluginLoginLaunch = pluginAuth.beginConnectInBrowser(pluginId, onOAuthCompleted)
 
     fun syncBrowserCookiesForUrl(url: String): Boolean = pluginAuth.syncBrowserCookiesForUrl(url)
+
+    fun botTelemetry(): StateFlow<Map<String, BotLiveActivity>> = engine.botTelemetry
+
+    fun liveReasoning(): StateFlow<LiveReasoningState> = engine.liveReasoning
+
+    fun stopAllExecution() = engine.stopAllExecution()
 
     fun currentAppVersion(): String = updater.currentVersionName()
 

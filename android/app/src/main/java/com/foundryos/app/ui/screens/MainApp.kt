@@ -52,8 +52,12 @@ import androidx.compose.material.icons.rounded.ChevronLeft
 import androidx.compose.material.icons.rounded.ChevronRight
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.FolderOpen
+import androidx.compose.material.icons.rounded.Language
+import androidx.compose.material.icons.rounded.PlaylistAdd
+import androidx.compose.material.icons.rounded.Psychology
 import androidx.compose.material.icons.rounded.Public
 import androidx.compose.material.icons.rounded.Settings
+import androidx.compose.material.icons.rounded.Stop
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -64,7 +68,9 @@ import androidx.compose.material3.VerticalDivider
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -95,6 +101,7 @@ import com.foundryos.app.data.ConnectorItem
 import com.foundryos.app.data.FoundryRepository
 import com.foundryos.app.data.PluginStatus
 import com.foundryos.app.data.ProviderStatus
+import com.foundryos.app.data.QueuedFounderMessage
 import com.foundryos.app.service.ApprovalNotifier
 import com.foundryos.app.ui.components.ArtifactDeliverableCard
 import com.foundryos.app.ui.components.BoardMeetingCard
@@ -102,8 +109,10 @@ import com.foundryos.app.ui.components.BotMascot
 import com.foundryos.app.ui.components.CompanyOrgCard
 import com.foundryos.app.ui.components.ReleaseApprovalCard
 import com.foundryos.app.ui.theme.FoundryColors
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import java.util.UUID
 
 /**
  * Exact Video UI — 100% On-Device Android Engine (No VPS Required):
@@ -128,8 +137,16 @@ fun FoundryMainScreen(repo: FoundryRepository) {
     var sidebarExpanded by remember { mutableStateOf(false) }
     var inputText by remember { mutableStateOf("") }
     var pendingAttachments by remember { mutableStateOf<List<AttachedLocalFile>>(emptyList()) }
+    var messageQueue by remember { mutableStateOf<List<QueuedFounderMessage>>(emptyList()) }
     var isBusy by remember { mutableStateOf(false) }
     var busyLabel by remember { mutableStateOf("") }
+    var activeRunJob by remember { mutableStateOf<Job?>(null) }
+    var inspectBot by remember { mutableStateOf<BotItem?>(null) }
+    var showReasoningExpanded by remember { mutableStateOf(false) }
+    var nowMs by remember { mutableLongStateOf(System.currentTimeMillis()) }
+
+    val botTelemetry by repo.botTelemetry().collectAsState()
+    val liveReasoning by repo.liveReasoning().collectAsState()
 
     val filePickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenMultipleDocuments(),
@@ -244,6 +261,79 @@ fun FoundryMainScreen(repo: FoundryRepository) {
         }
     }
 
+    // Live 1s timer while reasoning/bots are actively working
+    LaunchedEffect(liveReasoning.active, isBusy) {
+        while (liveReasoning.active || isBusy) {
+            nowMs = System.currentTimeMillis()
+            delay(1000)
+        }
+    }
+
+    fun launchExecution(
+        companyId: String?,
+        text: String,
+        filesToSend: List<AttachedLocalFile>,
+        targetBotId: String?,
+    ) {
+        activeRunJob = scope.launch {
+            isBusy = true
+            try {
+                if (companyId == null) {
+                    val desc = text.ifBlank {
+                        "Company working with ${filesToSend.joinToString(", ") { it.name }}"
+                    }
+                    busyLabel = "CEO is hiring your company..."
+                    val prop = repo.proposeCompany(desc)
+                    val created = repo.deployCompany(desc, prop)
+                    if (filesToSend.isNotEmpty()) {
+                        busyLabel = "Importing local files into sandbox..."
+                        repo.sendFounderMessage(
+                            companyId = created.id,
+                            text = text.ifBlank { "Inspect and process the attached local files." },
+                            attachments = filesToSend,
+                            onStatusUpdate = { status ->
+                                busyLabel = status
+                                refreshAll(created.id)
+                            },
+                        )
+                    }
+                    refreshAll(created.id)
+                } else {
+                    val bName = bots.firstOrNull { it.id == targetBotId }?.name ?: "CEO"
+                    busyLabel = "$bName is reasoning in sandbox..."
+                    repo.sendFounderMessage(
+                        companyId = companyId,
+                        text = text,
+                        attachments = filesToSend,
+                        targetBotId = targetBotId,
+                        onStatusUpdate = { status ->
+                            busyLabel = status
+                            refreshAll(companyId)
+                        },
+                    )
+                    refreshAll(companyId)
+                }
+            } finally {
+                isBusy = false
+                activeRunJob = null
+            }
+        }
+    }
+
+    // Auto-drain FIFO message queue cleanly once the active execution completes
+    LaunchedEffect(isBusy, messageQueue.size) {
+        if (!isBusy && messageQueue.isNotEmpty()) {
+            val next = messageQueue.first()
+            messageQueue = messageQueue.drop(1)
+            launchExecution(
+                companyId = next.companyId ?: activeCompanyId,
+                text = next.text,
+                filesToSend = next.attachments,
+                targetBotId = next.targetBotId,
+            )
+        }
+    }
+
     // Listen to instant UI refresh when user clicks "Ship" / "Not yet" in Android notification shade
     DisposableEffect(context) {
         val receiver = object : BroadcastReceiver() {
@@ -321,6 +411,7 @@ fun FoundryMainScreen(repo: FoundryRepository) {
                                 .clickable {
                                     repo.clearBotUnread(bot.id)
                                     selectedBot = bot
+                                    inspectBot = bot
                                     refreshAll(activeCompanyId)
                                 }
                                 .padding(2.dp),
@@ -444,6 +535,68 @@ fun FoundryMainScreen(repo: FoundryRepository) {
                     }
                 }
 
+                // === LIVE BOT TELEMETRY STRIP (Shows what selected/active bots are doing: tool, plugin, URL) ===
+                val activeBotLive = headerBot?.let { botTelemetry[it.id] }
+                    ?: botTelemetry.values.firstOrNull { it.status == "working" }
+                if (activeCompany != null && (activeBotLive != null || headerBot != null)) {
+                    val targetToInspect = headerBot ?: bots.firstOrNull()
+                    if (targetToInspect != null) {
+                        val bLive = botTelemetry[targetToInspect.id] ?: activeBotLive
+                        val isWorking = (bLive?.status ?: targetToInspect.status).equals("working", true)
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 12.dp)
+                                .padding(bottom = 4.dp)
+                                .clip(RoundedCornerShape(12.dp))
+                                .background(if (isWorking) FoundryColors.GreenBg else FoundryColors.SidebarBg)
+                                .border(1.dp, FoundryColors.Border, RoundedCornerShape(12.dp))
+                                .clickable { inspectBot = targetToInspect }
+                                .padding(horizontal = 10.dp, vertical = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(8.dp)
+                                        .background(if (isWorking) FoundryColors.GreenSolid else FoundryColors.InkMuted, CircleShape),
+                                )
+                                Spacer(Modifier.width(7.dp))
+                                val summaryText = buildString {
+                                    append(bLive?.botName ?: targetToInspect.name)
+                                    if (!bLive?.currentPlugin.isNullOrBlank()) append(" · ${bLive?.currentPlugin}")
+                                    if (!bLive?.currentTool.isNullOrBlank()) append(" → ${bLive?.currentTool}")
+                                    if (!bLive?.currentUrl.isNullOrBlank()) append(" · ${bLive?.currentUrl}")
+                                    else if (!bLive?.currentTask.isNullOrBlank()) append(" · ${bLive?.currentTask}")
+                                    else append(" · Tap to inspect tools & history")
+                                }
+                                Text(
+                                    text = summaryText,
+                                    fontSize = 11.5.sp,
+                                    fontWeight = FontWeight.Medium,
+                                    color = if (isWorking) FoundryColors.GreenInk else FoundryColors.InkSecondary,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                            }
+                            Spacer(Modifier.width(6.dp))
+                            Text(
+                                text = "Inspect",
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = FoundryColors.InkPrimary,
+                                maxLines = 1,
+                                softWrap = false,
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(999.dp))
+                                    .background(Color.White)
+                                    .padding(horizontal = 8.dp, vertical = 3.dp),
+                            )
+                        }
+                    }
+                }
+
             if (activeCompany == null) {
                 Column(
                     modifier = Modifier
@@ -518,7 +671,9 @@ fun FoundryMainScreen(repo: FoundryRepository) {
                         ChatMessageRow(
                             msg = msg,
                             onBotClick = { bot ->
-                                selectedBot = bots.firstOrNull { it.id == bot.id } ?: bot
+                                val chosen = bots.firstOrNull { it.id == bot.id } ?: bot
+                                selectedBot = chosen
+                                inspectBot = chosen
                             },
                             onApprove = { aprId ->
                                 scope.launch {
@@ -541,16 +696,103 @@ fun FoundryMainScreen(repo: FoundryRepository) {
                         )
                     }
 
-                    if (isBusy) {
+                    if (isBusy || liveReasoning.active) {
                         item {
-                            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(vertical = 4.dp)) {
-                                BotMascot(shape = "circle", colorHex = "#111111", size = 20.dp)
-                                Spacer(Modifier.width(8.dp))
-                                Text(
-                                    text = busyLabel.ifBlank { "CEO is working..." },
-                                    style = MaterialTheme.typography.labelMedium,
-                                    color = FoundryColors.InkSecondary,
-                                )
+                            val elapsedSec = ((nowMs - liveReasoning.startedAtMs.coerceAtLeast(1L)).coerceAtLeast(0L) / 1000L)
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(18.dp))
+                                    .background(FoundryColors.SidebarBg)
+                                    .border(1.dp, FoundryColors.Border, RoundedCornerShape(18.dp))
+                                    .padding(12.dp),
+                            ) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                ) {
+                                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
+                                        BotMascot(
+                                            shape = headerBot?.avatarShape ?: "circle",
+                                            colorHex = headerBot?.avatarColor ?: "#111111",
+                                            size = 20.dp,
+                                        )
+                                        Spacer(Modifier.width(8.dp))
+                                        Text(
+                                            text = liveReasoning.statusLine.ifBlank { busyLabel.ifBlank { "CEO thinking..." } },
+                                            style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold),
+                                            color = FoundryColors.InkPrimary,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
+                                        )
+                                    }
+                                    Spacer(Modifier.width(6.dp))
+                                    Text(
+                                        text = "${elapsedSec}s${if (liveReasoning.modelLabel.isNotBlank()) " · ${liveReasoning.modelLabel}" else ""}",
+                                        fontSize = 10.5.sp,
+                                        fontWeight = FontWeight.Medium,
+                                        color = FoundryColors.InkSecondary,
+                                        maxLines = 1,
+                                        softWrap = false,
+                                    )
+                                }
+                                val thoughts = liveReasoning.thinkingText.trim()
+                                if (thoughts.isNotBlank()) {
+                                    Spacer(Modifier.height(8.dp))
+                                    Text(
+                                        text = thoughts.takeLast(900),
+                                        fontSize = 12.sp,
+                                        lineHeight = 16.sp,
+                                        color = FoundryColors.InkSecondary,
+                                    )
+                                }
+                            }
+                        }
+                    } else if (liveReasoning.lastThinkingText.isNotBlank()) {
+                        item {
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(14.dp))
+                                    .background(Color(0xFFFAFAFB))
+                                    .border(1.dp, FoundryColors.Border, RoundedCornerShape(14.dp))
+                                    .clickable { showReasoningExpanded = !showReasoningExpanded }
+                                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                            ) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                ) {
+                                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
+                                        Icon(Icons.Rounded.Psychology, contentDescription = null, tint = FoundryColors.InkSecondary, modifier = Modifier.size(15.dp))
+                                        Spacer(Modifier.width(6.dp))
+                                        Text(
+                                            text = liveReasoning.lastCompletedSummary.ifBlank { "Reasoning trace" },
+                                            fontSize = 11.5.sp,
+                                            fontWeight = FontWeight.Medium,
+                                            color = FoundryColors.InkSecondary,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
+                                        )
+                                    }
+                                    Text(
+                                        text = if (showReasoningExpanded) "Hide" else "Show",
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = FoundryColors.InkPrimary,
+                                    )
+                                }
+                                if (showReasoningExpanded) {
+                                    Spacer(Modifier.height(6.dp))
+                                    Text(
+                                        text = liveReasoning.lastThinkingText.trim(),
+                                        fontSize = 11.5.sp,
+                                        lineHeight = 16.sp,
+                                        color = FoundryColors.InkSecondary,
+                                    )
+                                }
                             }
                         }
                     }
@@ -563,6 +805,47 @@ fun FoundryMainScreen(repo: FoundryRepository) {
                     .fillMaxWidth()
                     .padding(horizontal = 12.dp, vertical = 10.dp),
             ) {
+                if (messageQueue.isNotEmpty()) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState())
+                            .padding(bottom = 6.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        messageQueue.forEachIndexed { idx, q ->
+                            Row(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(999.dp))
+                                    .background(Color(0xFFFFFBEB))
+                                    .border(1.dp, FoundryColors.AmberInk.copy(alpha = 0.4f), RoundedCornerShape(999.dp))
+                                    .padding(horizontal = 10.dp, vertical = 5.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Text(
+                                    text = "Queue #${idx + 1}: ${q.text.ifBlank { "${q.attachments.size} file(s)" }}",
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Medium,
+                                    color = FoundryColors.AmberInk,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                                Spacer(Modifier.width(6.dp))
+                                Icon(
+                                    imageVector = Icons.Rounded.Close,
+                                    contentDescription = "Remove from queue",
+                                    tint = FoundryColors.AmberInk,
+                                    modifier = Modifier
+                                        .size(14.dp)
+                                        .clickable {
+                                            messageQueue = messageQueue.filterNot { it.id == q.id }
+                                        },
+                                )
+                            }
+                        }
+                    }
+                }
+
                 if (pendingAttachments.isNotEmpty()) {
                     Row(
                         modifier = Modifier
@@ -611,7 +894,7 @@ fun FoundryMainScreen(repo: FoundryRepository) {
                     }
                 }
 
-                val canSend = (inputText.isNotBlank() || pendingAttachments.isNotEmpty()) && !isBusy
+                val hasInput = inputText.isNotBlank() || pendingAttachments.isNotEmpty()
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -637,7 +920,11 @@ fun FoundryMainScreen(repo: FoundryRepository) {
                     Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.CenterStart) {
                         if (inputText.isEmpty()) {
                             Text(
-                                text = if (activeCompany == null) "Describe a company to found..." else "Message ${headerBot?.name ?: "CEO"}",
+                                text = when {
+                                    isBusy && activeCompany != null -> "Add next task to queue..."
+                                    activeCompany == null -> "Describe a company to found..."
+                                    else -> "Message ${headerBot?.name ?: "CEO"}"
+                                },
                                 style = MaterialTheme.typography.bodyMedium,
                                 color = FoundryColors.InkMuted,
                                 maxLines = 1,
@@ -654,66 +941,80 @@ fun FoundryMainScreen(repo: FoundryRepository) {
                         )
                     }
 
-                    Spacer(Modifier.width(8.dp))
+                    Spacer(Modifier.width(6.dp))
 
-                    Box(
-                        modifier = Modifier
-                            .size(34.dp)
-                            .clip(CircleShape)
-                            .background(if (canSend) FoundryColors.InkPrimary else FoundryColors.SoftSurface)
-                            .clickable(enabled = canSend) {
-                                val text = inputText.trim()
-                                val filesToSend = pendingAttachments
-                                inputText = ""
-                                pendingAttachments = emptyList()
-                                scope.launch {
-                                    isBusy = true
-                                    if (activeCompany == null) {
-                                        val desc = text.ifBlank {
-                                            "Company working with ${filesToSend.joinToString(", ") { it.name }}"
-                                        }
-                                        busyLabel = "CEO is hiring your company..."
-                                        val prop = repo.proposeCompany(desc)
-                                        val created = repo.deployCompany(desc, prop)
-                                        if (filesToSend.isNotEmpty()) {
-                                            busyLabel = "Importing local files into sandbox..."
-                                            repo.sendFounderMessage(
-                                                companyId = created.id,
-                                                text = text.ifBlank { "Inspect and process the attached local files." },
-                                                attachments = filesToSend,
-                                                onStatusUpdate = { status ->
-                                                    busyLabel = status
-                                                    refreshAll(created.id)
-                                                },
-                                            )
-                                        }
-                                        refreshAll(created.id)
-                                    } else {
-                                        busyLabel = "${headerBot?.name ?: "CEO"} is working in sandbox..."
+                    if (isBusy) {
+                        if (hasInput) {
+                            Row(
+                                modifier = Modifier
+                                    .heightIn(min = 34.dp)
+                                    .clip(RoundedCornerShape(999.dp))
+                                    .background(FoundryColors.InkPrimary)
+                                    .clickable {
+                                        val text = inputText.trim()
+                                        val filesToQueue = pendingAttachments
+                                        inputText = ""
+                                        pendingAttachments = emptyList()
                                         val targetId = if (headerBot?.isCeo == true) null else headerBot?.id
-                                        repo.sendFounderMessage(
-                                            companyId = activeCompany.id,
-                                            text = text,
-                                            attachments = filesToSend,
+                                        messageQueue = messageQueue + QueuedFounderMessage(
+                                            id = "q_${UUID.randomUUID().toString().take(8)}",
+                                            companyId = activeCompany?.id,
                                             targetBotId = targetId,
-                                            onStatusUpdate = { status ->
-                                                busyLabel = status
-                                                refreshAll(activeCompany.id)
-                                            },
+                                            text = text,
+                                            attachments = filesToQueue,
                                         )
-                                        refreshAll(activeCompany.id)
+                                        Toast.makeText(context, "Added to CEO queue (#${messageQueue.size})", Toast.LENGTH_SHORT).show()
                                     }
+                                    .padding(horizontal = 10.dp, vertical = 6.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Icon(Icons.Rounded.PlaylistAdd, contentDescription = "Queue", tint = Color.White, modifier = Modifier.size(15.dp))
+                                Spacer(Modifier.width(3.dp))
+                                Text("Queue", color = Color.White, fontSize = 11.5.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, softWrap = false)
+                            }
+                            Spacer(Modifier.width(5.dp))
+                        }
+
+                        Box(
+                            modifier = Modifier
+                                .size(34.dp)
+                                .clip(CircleShape)
+                                .background(FoundryColors.RedBg)
+                                .border(1.dp, FoundryColors.RedInk.copy(alpha = 0.35f), CircleShape)
+                                .clickable {
+                                    repo.stopAllExecution()
+                                    activeRunJob?.cancel()
                                     isBusy = false
-                                }
-                            },
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        Icon(
-                            imageVector = Icons.Rounded.ArrowUpward,
-                            contentDescription = "Send",
-                            tint = if (canSend) Color.White else FoundryColors.InkMuted,
-                            modifier = Modifier.size(18.dp),
-                        )
+                                    busyLabel = "Stopped"
+                                    Toast.makeText(context, "Stopped active execution", Toast.LENGTH_SHORT).show()
+                                },
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Icon(Icons.Rounded.Stop, contentDescription = "Stop", tint = FoundryColors.RedInk, modifier = Modifier.size(18.dp))
+                        }
+                    } else {
+                        Box(
+                            modifier = Modifier
+                                .size(34.dp)
+                                .clip(CircleShape)
+                                .background(if (hasInput) FoundryColors.InkPrimary else FoundryColors.SoftSurface)
+                                .clickable(enabled = hasInput) {
+                                    val text = inputText.trim()
+                                    val filesToSend = pendingAttachments
+                                    inputText = ""
+                                    pendingAttachments = emptyList()
+                                    val targetId = if (headerBot?.isCeo == true) null else headerBot?.id
+                                    launchExecution(activeCompany?.id, text, filesToSend, targetId)
+                                },
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.ArrowUpward,
+                                contentDescription = "Send",
+                                tint = if (hasInput) Color.White else FoundryColors.InkMuted,
+                                modifier = Modifier.size(18.dp),
+                            )
+                        }
                     }
                 }
             }
@@ -842,6 +1143,7 @@ fun FoundryMainScreen(repo: FoundryRepository) {
                                         .clickable {
                                             repo.clearBotUnread(bot.id)
                                             selectedBot = bot
+                                            inspectBot = bot
                                             sidebarExpanded = false
                                             refreshAll(activeCompanyId)
                                         }
@@ -860,7 +1162,8 @@ fun FoundryMainScreen(repo: FoundryRepository) {
                                             overflow = TextOverflow.Ellipsis,
                                         )
                                         Text(
-                                            bot.statusText.ifBlank { bot.tagline },
+                                            botTelemetry[bot.id]?.currentTask?.ifBlank { bot.statusText }
+                                                ?: bot.statusText.ifBlank { bot.tagline },
                                             fontSize = 11.sp,
                                             color = FoundryColors.InkSecondary,
                                             maxLines = 1,
@@ -1173,6 +1476,24 @@ fun FoundryMainScreen(repo: FoundryRepository) {
                 settingsMessage = null
                 showSettingsDialog = false
             },
+        )
+    }
+
+    if (inspectBot != null) {
+        BotInspectorDialog(
+            bot = inspectBot!!,
+            allBots = bots,
+            telemetryMap = botTelemetry,
+            onSelectBot = { nextBot ->
+                inspectBot = nextBot
+                selectedBot = nextBot
+            },
+            onOpenUrl = { url ->
+                browserUrl = url
+                browserIsOAuth = false
+                showBrowserDialog = true
+            },
+            onDismiss = { inspectBot = null },
         )
     }
 

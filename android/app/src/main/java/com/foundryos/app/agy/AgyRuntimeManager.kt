@@ -522,6 +522,7 @@ class AgyRuntimeManager(private val context: Context) {
         prompt: String,
         modelId: String = selectedModel,
         onStatus: suspend (String) -> Unit = {},
+        onThinkingDelta: suspend (String) -> Unit = {},
     ): Pair<Boolean, String> = runMutex.withLock {
         withContext(Dispatchers.IO) {
             if (!installer.isInstalled()) return@withContext false to "Antigravity CLI not installed"
@@ -585,15 +586,25 @@ class AgyRuntimeManager(private val context: Context) {
                                 val stepType = su?.optString("step_type").orEmpty().lowercase()
                                 val textDelta = su?.optString("text_delta").orEmpty()
                                 val thinkingDelta = su?.optString("thinking_delta").orEmpty()
+                                    .ifBlank { su?.optString("thought").orEmpty() }
+                                    .ifBlank { su?.optString("reasoning").orEmpty() }
+                                if (thinkingDelta.isNotBlank()) {
+                                    scope.launch { onThinkingDelta(thinkingDelta) }
+                                }
                                 if (stepType.contains("think") || thinkingDelta.isNotBlank()) {
-                                    scope.launch { onStatus("CEO reasoning via agy...") }
+                                    scope.launch { onStatus("Reasoning via agy (${chosenModel.ifBlank { "auto" }})...") }
                                 } else if (stepType.contains("tool")) {
                                     val tName = su?.optString("tool_name").orEmpty()
                                         .ifBlank { su?.optString("name").orEmpty() }
                                         .ifBlank { stepType }
-                                    scope.launch { onStatus("agy: $tName...") }
+                                    val tArgs = su?.optString("arguments").orEmpty().take(120)
+                                    scope.launch {
+                                        onStatus("agy → $tName...")
+                                        onThinkingDelta("\n[CLI Tool: $tName${if (tArgs.isNotBlank()) " $tArgs" else ""}]\n")
+                                    }
                                 } else if (stepType == "agent_response" && textDelta.isNotBlank()) {
                                     streamedResponse.append(textDelta)
+                                    scope.launch { onThinkingDelta(textDelta) }
                                 }
                             }
                             "result" -> {
@@ -612,9 +623,14 @@ class AgyRuntimeManager(private val context: Context) {
                                 val legacyText = obj.optString("text").ifBlank { obj.optString("content") }
                                     .ifBlank { obj.optString("result") }
                                 if (legacyType.contains("tool")) {
-                                    scope.launch { onStatus("agy: ${obj.optString("name", "working")}...") }
+                                    val tName = obj.optString("name", "working")
+                                    scope.launch {
+                                        onStatus("agy: $tName...")
+                                        onThinkingDelta("\n[CLI Tool: $tName]\n")
+                                    }
                                 } else if (legacyText.isNotBlank()) {
                                     streamedResponse.append(legacyText)
+                                    scope.launch { onThinkingDelta(legacyText) }
                                 }
                             }
                         }

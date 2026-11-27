@@ -246,3 +246,47 @@ data class AppUpdateInfo(
     val releaseUrl: String = "",
     val error: String = "",
 )
+
+data class BotActionTrace(
+    val timestampMs: Long,
+    val tool: String,
+    val plugin: String,
+    val url: String = "",
+    val summary: String = "",
+    val ok: Boolean = true,
+)
+
+data class BotLiveActivity(
+    val botId: String,
+    val botName: String,
+    val role: String,
+    val avatarShape: String = "circle",
+    val avatarColor: String = "#111111",
+    val status: String = "idle", // working | idle | error | stopped
+    val currentTask: String = "",
+    val currentPlugin: String = "",
+    val currentTool: String = "",
+    val currentUrl: String = "",
+    val currentReasoning: String = "",
+    val updatedAtMs: Long = System.currentTimeMillis(),
+    val traces: List<BotActionTrace> = emptyList(),
+)
+
+data class LiveReasoningState(
+    val active: Boolean = false,
+    val actorName: String = "CEO",
+    val modelLabel: String = "",
+    val statusLine: String = "",
+    val thinkingText: String = "",
+    val startedAtMs: Long = 0L,
+    val lastCompletedSummary: String = "",
+    val lastThinkingText: String = "",
+)
+
+data class QueuedFounderMessage(
+    val id: String,
+    val companyId: String?,
+    val targetBotId: String?,
+    val text: String,
+    val attachments: List<AttachedLocalFile> = emptyList(),
+)

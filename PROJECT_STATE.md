@@ -18,6 +18,11 @@
 - [x] **Signature Persistante & Auto-Updater In-App (`AppUpdateManager.kt`, CI Secrets)** :
   - Keystore RSA 2048-bit persistant stocké dans les Secrets GitHub (`ANDROID_KEYSTORE_BASE64`) pour que toutes les futures versions gardent exactement la même signature Android (mises à jour sur place sans désinstaller ni perdre les sandboxes/comptes).
   - Auto-vérification des Releases GitHub + téléchargement APK signé + lancement natif de l'installeur Android depuis Settings → App Updates.
+- [x] **Agents 100% Autonomes, Raisonnement Live, File d'attente + Stop & Télémétrie (`BotInspectorDialog.kt`)** :
+  - Chaque bot utilise ses plugins/tools/LLMs de façon autonome, rapporte ses résultats au CEO (`[Bot → CEO]`) et enregistre ses traces (plugin, tool, site URL, raisonnement).
+  - Raisonnement du CEO affiché en temps réel dans le chat (pendant l'exécution + résumé déroulable juste après).
+  - Composer avec **Stop immédiat (■)** et **File d'attente FIFO (`+ Queue`)** quand une tâche est déjà en cours.
+  - Clic sur un bot → bannière télémétrie en direct + inspecteur détaillé (site visité cliquable, outil actif, raisonnement et historique chronologique).
 - [x] **UI Corrigée, Sections Collapsables & Navigateur In-App** (`MainApp.kt`, `Sheets.kt`, `InAppBrowserDialog.kt`).
 - [x] **Backend Python (`backend/`)** : 5/5 tests `pytest` verts sur CI.
 

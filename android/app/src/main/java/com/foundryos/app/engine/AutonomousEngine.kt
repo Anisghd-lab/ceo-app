@@ -6,14 +6,21 @@ import com.foundryos.app.agy.AgyRuntimeManager
 import com.foundryos.app.data.ApprovalItem
 import com.foundryos.app.data.ArtifactItem
 import com.foundryos.app.data.BoardMeetingData
+import com.foundryos.app.data.BotActionTrace
 import com.foundryos.app.data.BotItem
+import com.foundryos.app.data.BotLiveActivity
 import com.foundryos.app.data.ChatMessageItem
 import com.foundryos.app.data.CompanyItem
 import com.foundryos.app.data.CompanyProposalData
+import com.foundryos.app.data.LiveReasoningState
 import com.foundryos.app.plugins.PluginAuthManager
+import com.foundryos.app.plugins.PluginRegistry
 import com.foundryos.app.plugins.PluginToolExecutor
 import com.foundryos.app.service.ApprovalNotifier
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
@@ -45,14 +52,115 @@ class AutonomousEngine(
         .readTimeout(30, TimeUnit.SECONDS)
         .build()
 
+    private val _botTelemetry = MutableStateFlow<Map<String, BotLiveActivity>>(emptyMap())
+    val botTelemetry: StateFlow<Map<String, BotLiveActivity>> = _botTelemetry.asStateFlow()
+
+    private val _liveReasoning = MutableStateFlow(LiveReasoningState())
+    val liveReasoning: StateFlow<LiveReasoningState> = _liveReasoning.asStateFlow()
+
+    @Volatile
+    var runCancelled: Boolean = false
+        private set
+
     var killSwitch: Boolean
         get() = prefs.getBoolean("kill_switch", false)
         set(value) {
             prefs.edit().putBoolean("kill_switch", value).apply()
             if (value) {
-                agy?.stopActiveRun()
+                stopAllExecution()
             }
         }
+
+    fun resetCancellation() {
+        runCancelled = false
+    }
+
+    fun stopAllExecution() {
+        runCancelled = true
+        agy?.stopActiveRun()
+        val updated = _botTelemetry.value.mapValues { (_, act) ->
+            if (act.status == "working") act.copy(status = "stopped", currentTask = "Stopped by Founder", updatedAtMs = System.currentTimeMillis()) else act
+        }
+        _botTelemetry.value = updated
+        val cur = _liveReasoning.value
+        if (cur.active) {
+            _liveReasoning.value = cur.copy(
+                active = false,
+                statusLine = "Stopped by Founder",
+                lastCompletedSummary = "Stopped after ${(System.currentTimeMillis() - cur.startedAtMs) / 1000}s",
+                lastThinkingText = cur.thinkingText.ifBlank { cur.lastThinkingText },
+            )
+        }
+    }
+
+    private fun beginReasoning(actorName: String, modelLabel: String = "", statusLine: String = "Thinking...") {
+        _liveReasoning.value = _liveReasoning.value.copy(
+            active = true,
+            actorName = actorName,
+            modelLabel = modelLabel,
+            statusLine = statusLine,
+            thinkingText = "",
+            startedAtMs = System.currentTimeMillis(),
+        )
+    }
+
+    private fun appendReasoning(delta: String) {
+        if (delta.isEmpty()) return
+        val cur = _liveReasoning.value
+        val next = (cur.thinkingText + delta).takeLast(3500)
+        _liveReasoning.value = cur.copy(thinkingText = next)
+    }
+
+    private fun updateReasoningStatus(line: String) {
+        val cur = _liveReasoning.value
+        if (cur.active) {
+            _liveReasoning.value = cur.copy(statusLine = line)
+        }
+    }
+
+    private fun finishReasoning(summary: String = "") {
+        val cur = _liveReasoning.value
+        val secs = ((System.currentTimeMillis() - cur.startedAtMs).coerceAtLeast(0L) / 1000L)
+        _liveReasoning.value = cur.copy(
+            active = false,
+            lastCompletedSummary = summary.ifBlank { "${cur.actorName} reasoned (${secs}s)" },
+            lastThinkingText = cur.thinkingText.ifBlank { cur.lastThinkingText },
+        )
+    }
+
+    private fun recordBotActivity(
+        bot: BotItem,
+        status: String,
+        task: String = "",
+        plugin: String = "",
+        tool: String = "",
+        url: String = "",
+        reasoning: String = "",
+        addTrace: BotActionTrace? = null,
+    ) {
+        val prev = _botTelemetry.value[bot.id]
+        val traces = if (addTrace != null) {
+            ((prev?.traces ?: emptyList()) + addTrace).takeLast(25)
+        } else {
+            prev?.traces ?: emptyList()
+        }
+        val next = BotLiveActivity(
+            botId = bot.id,
+            botName = bot.name,
+            role = bot.role,
+            avatarShape = bot.avatarShape,
+            avatarColor = bot.avatarColor,
+            status = status,
+            currentTask = task.ifBlank { prev?.currentTask.orEmpty() },
+            currentPlugin = plugin.ifBlank { prev?.currentPlugin.orEmpty() },
+            currentTool = tool.ifBlank { prev?.currentTool.orEmpty() },
+            currentUrl = url.ifBlank { prev?.currentUrl.orEmpty() },
+            currentReasoning = reasoning.ifBlank { prev?.currentReasoning.orEmpty() }.takeLast(1200),
+            updatedAtMs = System.currentTimeMillis(),
+            traces = traces,
+        )
+        _botTelemetry.value = _botTelemetry.value + (bot.id to next)
+    }
 
     fun hasActiveEngine(): Boolean =
         llm.hasAnyKey() || canUseAgyEngine()
@@ -69,6 +177,9 @@ class AutonomousEngine(
         maxTokens: Int = 1800,
         onStatus: suspend (String) -> Unit = {},
     ): LLMCallResult {
+        if (runCancelled || killSwitch) {
+            return LLMCallResult(ok = false, provider = "stopped", error = "Stopped by Founder")
+        }
         if (canUseAgyEngine()) {
             val runtime = agy!!
             val targetDir = sandboxDir ?: runtime.installer.homeDir()
@@ -89,7 +200,11 @@ class AutonomousEngine(
                 sandboxDir = targetDir,
                 prompt = prompt,
                 modelId = modelId,
-                onStatus = onStatus,
+                onStatus = { st ->
+                    updateReasoningStatus(st)
+                    onStatus(st)
+                },
+                onThinkingDelta = { delta -> appendReasoning(delta) },
             )
             if (ok && output.isNotBlank()) {
                 return LLMCallResult(
@@ -100,16 +215,20 @@ class AutonomousEngine(
                     tokensUsed = (output.length / 4).coerceAtLeast(1),
                 )
             }
-            if (!llm.hasAnyKey()) {
+            if (runCancelled || !llm.hasAnyKey()) {
                 return LLMCallResult(ok = false, provider = "antigravity", error = output.ifBlank { "Antigravity CLI failed" })
             }
         }
-        return llm.complete(
+        val llmRes = llm.complete(
             messages = listOf("system" to systemPrompt, "user" to userPrompt),
             modelSpec = modelSpec,
             jsonMode = jsonMode,
             maxTokens = maxTokens,
         )
+        if (llmRes.ok && llmRes.content.isNotBlank()) {
+            appendReasoning("\n[${llmRes.provider}/${llmRes.model}] ${llmRes.content.take(400)}\n")
+        }
+        return llmRes
     }
 
     private val avatarPalette = listOf(
@@ -133,6 +252,8 @@ class AutonomousEngine(
     )
 
     suspend fun proposeCompany(description: String): CompanyProposalData {
+        resetCancellation()
+        beginReasoning("CEO", agy?.selectedModel ?: "Architect", "Designing company team & plugins...")
         val prompt = """
             You are the Founder's AI CEO inside an autonomous multi-sandbox Android OS.
             Nothing is hardcoded by industry. The human described a new company to launch:
@@ -169,8 +290,10 @@ class AutonomousEngine(
 
         val parsed = if (resp.ok) llm.extractJsonObject(resp.content) else null
         if (parsed != null && parsed.optJSONArray("bots")?.length() ?: 0 >= 2) {
+            finishReasoning("Designed ${parsed.optString("name", "company")} team")
             return normalizeProposal(parsed, description)
         }
+        finishReasoning(if (resp.ok) "Proposal structured" else "Error: ${resp.error.take(60)}")
         val errDetail = when {
             !hasActiveEngine() -> "Aucun moteur IA connecté (installez Antigravity CLI et connectez Google dans ⚙️ Settings)."
             !resp.ok -> "Erreur moteur IA (${resp.provider}): ${resp.error.take(180)}"
@@ -408,6 +531,7 @@ class AutonomousEngine(
         targetBotId: String? = null,
         onStatusUpdate: suspend (String) -> Unit = {},
     ) {
+        resetCancellation()
         val comp = db.getCompany(companyId) ?: return
         db.insertMessage(ChatMessageItem("msg_${UUID.randomUUID().toString().take(10)}", companyId, "human", content = displayMessage))
 
@@ -431,20 +555,32 @@ class AutonomousEngine(
         val targetBot = targetBotId?.let { id -> bots.firstOrNull { it.id == id } }
 
         if (targetBot != null && !targetBot.isCeo) {
+            beginReasoning(targetBot.name, targetBot.model, "${targetBot.name} reasoning...")
             onStatusUpdate("${targetBot.name} is reasoning...")
+            recordBotActivity(targetBot, "working", task = text.take(80), reasoning = "Analyzing founder request...")
             db.updateBotStatus(targetBot.id, "working", "Thinking...")
             val reply = runDirectBotChat(comp, targetBot, enrichedPrompt, onStatusUpdate)
-            db.updateBotStatus(targetBot.id, "idle", reply.take(50))
-            db.insertMessage(
-                ChatMessageItem(
-                    "msg_${UUID.randomUUID().toString().take(10)}",
-                    companyId,
-                    "bot",
-                    botId = targetBot.id,
-                    botName = targetBot.name,
-                    content = reply,
-                )
+            val stopped = runCancelled || killSwitch
+            recordBotActivity(
+                targetBot,
+                status = if (stopped) "stopped" else "idle",
+                task = if (stopped) "Stopped by Founder" else reply.take(80),
+                reasoning = _liveReasoning.value.thinkingText,
             )
+            db.updateBotStatus(targetBot.id, if (stopped) "idle" else "idle", if (stopped) "Stopped" else reply.take(50))
+            finishReasoning(if (stopped) "Stopped" else "${targetBot.name} finished")
+            if (!stopped || reply.isNotBlank()) {
+                db.insertMessage(
+                    ChatMessageItem(
+                        "msg_${UUID.randomUUID().toString().take(10)}",
+                        companyId,
+                        "bot",
+                        botId = targetBot.id,
+                        botName = targetBot.name,
+                        content = if (stopped) "⏹️ Stopped (${targetBot.name})." else reply,
+                    )
+                )
+            }
             return
         }
 
@@ -483,7 +619,12 @@ class AutonomousEngine(
             return
         }
 
-        ceoBot?.let { db.updateBotStatus(it.id, "working", "Reasoning via agy...") }
+        val activeModelLabel = if (canUseAgyEngine()) agy!!.selectedModel else (ceoBot?.model ?: "LLM")
+        beginReasoning("CEO", activeModelLabel, "Analyzing request & company tools...")
+        ceoBot?.let {
+            recordBotActivity(it, "working", task = userPrompt.take(80), reasoning = "Thinking about founder prompt...")
+            db.updateBotStatus(it.id, "working", "Reasoning...")
+        }
         onStatusUpdate("CEO is thinking with Antigravity CLI...")
 
         val mem = db.recallNotes(comp.id, 6).joinToString("\n")
@@ -523,7 +664,8 @@ class AutonomousEngine(
 
         var finalReply = ""
         for (step in 1..6) {
-            if (killSwitch) break
+            if (runCancelled || killSwitch) break
+            updateReasoningStatus(if (step == 1) "CEO reasoning via $activeModelLabel..." else "CEO step $step/6...")
             onStatusUpdate(if (step == 1) "CEO reasoning via Antigravity CLI..." else "CEO step $step/6...")
             val res = runAiCompletion(
                 systemPrompt = systemPrompt,
@@ -533,8 +675,13 @@ class AutonomousEngine(
                 maxTokens = 2200,
                 onStatus = onStatusUpdate,
             )
+            if (runCancelled || killSwitch) break
             if (!res.ok) {
-                ceoBot?.let { db.updateBotStatus(it.id, "idle", "Error") }
+                ceoBot?.let {
+                    recordBotActivity(it, "error", task = res.error.take(80))
+                    db.updateBotStatus(it.id, "idle", "Error")
+                }
+                finishReasoning("Error (${res.provider})")
                 db.insertMessage(
                     ChatMessageItem(
                         "msg_${UUID.randomUUID().toString().take(10)}",
@@ -554,6 +701,7 @@ class AutonomousEngine(
                 act == "run_mission" -> {
                     val ceoReply = obj?.optString("ceo_reply").orEmpty().trim()
                     if (ceoReply.isNotBlank()) {
+                        appendReasoning("\n[CEO Delegation Plan] $ceoReply\n")
                         db.insertMessage(
                             ChatMessageItem(
                                 "msg_${UUID.randomUUID().toString().take(10)}",
@@ -568,6 +716,7 @@ class AutonomousEngine(
                     val mTitle = obj?.optString("title").orEmpty().ifBlank { userPrompt.take(58) }
                     val mGoal = obj?.optString("goal").orEmpty().ifBlank { userPrompt }
                     runFullMission(comp, bots, title = mTitle, goal = mGoal, onStatusUpdate = onStatusUpdate)
+                    finishReasoning("Mission completed")
                     return
                 }
                 act == "tool" && obj != null -> {
@@ -590,10 +739,33 @@ class AutonomousEngine(
             }
         }
 
+        if (runCancelled) {
+            ceoBot?.let {
+                recordBotActivity(it, "stopped", task = "Stopped by Founder")
+                db.updateBotStatus(it.id, "idle", "Stopped")
+            }
+            finishReasoning("Stopped by Founder")
+            db.insertMessage(
+                ChatMessageItem(
+                    "msg_${UUID.randomUUID().toString().take(10)}",
+                    comp.id,
+                    "bot",
+                    botId = ceoBot?.id,
+                    botName = "CEO",
+                    content = "⏹️ Exécution interrompue à ta demande.",
+                )
+            )
+            return
+        }
+
         if (finalReply.isBlank()) {
             finalReply = history.lastOrNull().orEmpty().ifBlank { "Action exécutée dans la sandbox." }
         }
-        ceoBot?.let { db.updateBotStatus(it.id, "idle", finalReply.take(48)) }
+        ceoBot?.let {
+            recordBotActivity(it, "idle", task = finalReply.take(80), reasoning = _liveReasoning.value.thinkingText)
+            db.updateBotStatus(it.id, "idle", finalReply.take(48))
+        }
+        finishReasoning("CEO reasoned (${finalReply.length} chars)")
         db.insertMessage(
             ChatMessageItem(
                 "msg_${UUID.randomUUID().toString().take(10)}",
@@ -696,8 +868,9 @@ class AutonomousEngine(
 
         // Step 1: Strategist / Scoping (Agentic with connected Plugins + LLM)
         var scopedSpec = goal
-        if (strategistBot != null && hasActiveEngine()) {
+        if (strategistBot != null && hasActiveEngine() && !runCancelled) {
             onStatusUpdate("${strategistBot.name} researching with plugins...")
+            recordBotActivity(strategistBot, "working", task = "Researching & Scoping: $title", reasoning = "Planning research with plugins...")
             db.updateBotStatus(strategistBot.id, "working", "Research & Spec...")
             val specReply = runDirectBotChat(
                 comp = comp,
@@ -705,32 +878,51 @@ class AutonomousEngine(
                 userText = "Research this mission for '${comp.name}' (Objective: ${comp.description}) using relevant plugins (browser_search, browser_read_url, notion_search, github_list_repos, scite_search, gdrive_search, etc.) if useful, then produce a detailed actionable specification and quality checklist.\nMission: $goal",
                 onStatusUpdate = onStatusUpdate,
             )
-            if (!specReply.startsWith("⚠️")) {
+            if (!specReply.startsWith("⚠️") && !runCancelled) {
                 scopedSpec = specReply
                 sandbox.writeTextFile(comp.id, "workspace/${missionId}_spec.md", scopedSpec)
+                recordBotActivity(strategistBot, "idle", task = "Spec complete", reasoning = scopedSpec.take(300))
                 db.updateBotStatus(strategistBot.id, "idle", "Spec done", incrementUnread = true)
+                db.rememberNote("mem_${UUID.randomUUID().toString().take(8)}", comp.id, strategistBot.name, "report_to_ceo", scopedSpec.take(600))
+                db.insertMessage(
+                    ChatMessageItem(
+                        "msg_${UUID.randomUUID().toString().take(10)}",
+                        comp.id,
+                        "bot",
+                        botId = strategistBot.id,
+                        botName = strategistBot.name,
+                        content = "📋 [${strategistBot.name} → CEO] Spec & recherche prêtes : ${scopedSpec.lineSequence().firstOrNull { it.isNotBlank() }?.take(140) ?: "Spec validée"}",
+                    )
+                )
             } else {
+                recordBotActivity(strategistBot, "idle", task = "Ready")
                 db.updateBotStatus(strategistBot.id, "idle", "Ready")
             }
         }
+        if (runCancelled || killSwitch) return
 
         // Step 2: Producer Bot runs Multi-Step Agentic Loop inside isolated Android sandbox + Plugins
         onStatusUpdate("${producerBot.name} is building in sandbox...")
+        recordBotActivity(producerBot, "working", task = "Building deliverables: $title")
         db.updateBotStatus(producerBot.id, "working", "Building deliverable...")
 
         var createdArtifacts = runProducerAgentLoop(comp, producerBot, missionId, title, goal, scopedSpec, onStatusUpdate)
+        recordBotActivity(producerBot, "idle", task = "Built ${createdArtifacts.size} artifact(s)")
         db.updateBotStatus(producerBot.id, "idle", "Deliverable ready", incrementUnread = true)
+        if (runCancelled || killSwitch) return
 
         // Step 3: Independent Quality Auditor checks every artifact against company objective
         onStatusUpdate("${qaBot.name} is verifying quality...")
+        recordBotActivity(qaBot, "working", task = "Auditing ${createdArtifacts.firstOrNull()?.filename ?: title}", tool = "qa_verify", plugin = "Quality Auditor")
         db.updateBotStatus(qaBot.id, "working", "Auditing in sandbox...")
 
         var primaryArt = createdArtifacts.firstOrNull()
         var qaTuple = runIndependentQa(comp, qaBot, primaryArt, goal)
 
         // Self-correction cycle: if QA fails or scores < 70, Producer automatically revises once!
-        if ((!qaTuple.first || qaTuple.second < 70) && hasActiveEngine() && !killSwitch) {
+        if ((!qaTuple.first || qaTuple.second < 70) && hasActiveEngine() && !killSwitch && !runCancelled) {
             onStatusUpdate("${producerBot.name} revising after QA (${qaTuple.second}/100)...")
+            recordBotActivity(producerBot, "working", task = "Revising after QA (${qaTuple.second}/100)")
             db.updateBotStatus(producerBot.id, "working", "Fixing QA issues...")
             val revised = runProducerAgentLoop(
                 comp,
@@ -746,11 +938,23 @@ class AutonomousEngine(
                 primaryArt = revised.firstOrNull()
                 qaTuple = runIndependentQa(comp, qaBot, primaryArt, goal)
             }
+            recordBotActivity(producerBot, "idle", task = "Revision complete")
             db.updateBotStatus(producerBot.id, "idle", "Revised", incrementUnread = true)
         }
 
         val (qaPassed, qaScore, qaReport) = qaTuple
+        recordBotActivity(qaBot, "idle", task = "QA $qaScore/100 · $qaReport", reasoning = qaReport)
         db.updateBotStatus(qaBot.id, "idle", "QA $qaScore/100", incrementUnread = true)
+        db.insertMessage(
+            ChatMessageItem(
+                "msg_${UUID.randomUUID().toString().take(10)}",
+                comp.id,
+                "bot",
+                botId = qaBot.id,
+                botName = qaBot.name,
+                content = "🛡️ [${qaBot.name} → CEO] Audit QA : $qaScore/100 — $qaReport",
+            )
+        )
 
         for (art in createdArtifacts) {
             val status = if (qaPassed) "PASSED" else "FAILED"
@@ -978,9 +1182,24 @@ class AutonomousEngine(
         args: JSONObject,
         onStatusUpdate: suspend (String) -> Unit = {},
     ): Pair<String, ArtifactItem?> {
+        val pluginDef = PluginRegistry.ALL.firstOrNull { p -> p.tools.any { it.name == tool } }
+        val pluginName = pluginDef?.name ?: "Sandbox Core"
+        val resolvedUrl = resolveToolDisplayUrl(tool, args)
+        val ts = System.currentTimeMillis()
+
+        recordBotActivity(
+            bot = bot,
+            status = "working",
+            task = "Running $pluginName · $tool",
+            plugin = pluginName,
+            tool = tool,
+            url = resolvedUrl,
+        )
+        appendReasoning("\n[${bot.name} → $pluginName | $tool${if (resolvedUrl.isNotBlank()) " | $resolvedUrl" else ""}]\n")
+
         val exec = pluginExecutor
         if (exec != null && exec.isPluginTool(tool)) {
-            onStatusUpdate("${bot.name} using plugin '$tool'...")
+            onStatusUpdate("${bot.name} · $pluginName → $tool")
             val res = exec.execute(comp.id, tool, args, allowWriteExecution = false)
             if (res.requiresApproval) {
                 val aprId = "apr_${UUID.randomUUID().toString().take(10)}"
@@ -1011,7 +1230,6 @@ class AutonomousEngine(
                 )
                 ApprovalNotifier.showApprovalNotification(context, approval)
             }
-            // If plugin wrote a file (e.g., product_design_prototype -> output/*.html), register it
             val objOut = runCatching { JSONObject(res.output) }.getOrNull()
             val relPath = objOut?.optString("rel_path").orEmpty()
             var createdArt: ArtifactItem? = null
@@ -1021,9 +1239,52 @@ class AutonomousEngine(
                     createdArt = registerArtifact(comp.id, bot.name, f.nameWithoutExtension, f, "Generated via $tool")
                 }
             }
+            recordBotActivity(
+                bot = bot,
+                status = "working",
+                task = "Completed $tool",
+                plugin = pluginName,
+                tool = tool,
+                url = resolvedUrl,
+                addTrace = BotActionTrace(ts, tool, pluginName, resolvedUrl, res.output.take(180), res.ok),
+            )
             return res.output to createdArt
         }
-        return executeSandboxTool(comp, bot, tool, args)
+        val (out, art) = executeSandboxTool(comp, bot, tool, args)
+        val okFlag = !out.contains("\"ok\":false", ignoreCase = true)
+        recordBotActivity(
+            bot = bot,
+            status = "working",
+            task = "Completed $tool",
+            plugin = pluginName,
+            tool = tool,
+            url = resolvedUrl,
+            addTrace = BotActionTrace(ts, tool, pluginName, resolvedUrl, out.take(180), okFlag),
+        )
+        return out to art
+    }
+
+    private fun resolveToolDisplayUrl(tool: String, args: JSONObject): String {
+        val explicit = args.optString("url")
+        if (explicit.startsWith("http")) return explicit
+        return when {
+            tool == "browser_search" -> "https://duckduckgo.com/?q=${android.net.Uri.encode(args.optString("query"))}"
+            tool.startsWith("github_") -> {
+                val o = args.optString("owner")
+                val r = args.optString("repo")
+                if (o.isNotBlank() && r.isNotBlank()) "https://github.com/$o/$r" else "https://github.com"
+            }
+            tool.startsWith("notion_") -> "https://www.notion.so"
+            tool.startsWith("slack_") -> "https://app.slack.com"
+            tool.startsWith("gmail_") -> "https://mail.google.com"
+            tool.startsWith("gdrive_") -> "https://drive.google.com"
+            tool.startsWith("figma_") -> "https://www.figma.com"
+            tool.startsWith("canva_") -> "https://www.canva.com"
+            tool.startsWith("kittl_") -> "https://www.kittl.com/projects"
+            tool.startsWith("scite_") -> "https://scite.ai"
+            tool.startsWith("tinyfish_") -> args.optString("url").ifBlank { "https://app.tinyfish.io" }
+            else -> ""
+        }
     }
 
     private fun emitArtifactCard(comp: CompanyItem, botName: String, art: ArtifactItem) {

@@ -1,5 +1,6 @@
 package com.foundryos.app.ui.screens
 
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -27,6 +28,8 @@ import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Delete
 import androidx.compose.material.icons.rounded.Download
 import androidx.compose.material.icons.rounded.Extension
+import androidx.compose.material.icons.rounded.KeyboardArrowDown
+import androidx.compose.material.icons.rounded.KeyboardArrowUp
 import androidx.compose.material.icons.rounded.LinkOff
 import androidx.compose.material.icons.rounded.PersonAdd
 import androidx.compose.material.icons.rounded.Public
@@ -380,14 +383,32 @@ fun SettingsDialog(
 
             Spacer(Modifier.height(14.dp))
 
-            // === ANTIGRAVITY CLI + MULTI-GOOGLE ACCOUNTS + LIVE MODEL QUOTAS ===
+            var expandAgySection by remember { mutableStateOf(true) }
+            var expandAgyQuotas by remember { mutableStateOf(true) }
+            var expandAgyModels by remember { mutableStateOf(false) }
+            var expandPluginsSection by remember { mutableStateOf(false) }
+            var expandExternalLlmSection by remember { mutableStateOf(false) }
+            var expandConnectorsSection by remember { mutableStateOf(false) }
+            var expandSafetySection by remember { mutableStateOf(false) }
+
+            // === 1. ANTIGRAVITY CLI + MULTI-GOOGLE ACCOUNTS + COLLAPSIBLE QUOTAS & MODELS ===
+            CollapsibleSectionHeader(
+                title = "Antigravity CLI & Google",
+                subtitle = when {
+                    !agyCliStatus.supportedAbi -> "ARM64 Android required"
+                    agyCliStatus.installed -> "Installed · ${agyCliStatus.version.ifBlank { "ready" }}"
+                    else -> "Native on-device engine (0 Termux)"
+                },
+                badgeText = if (agyAuthState.signedIn) agyAuthState.email.ifBlank { "Connected" } else if (agyCliStatus.installed) "Sign in" else "Install",
+                badgeBg = if (agyAuthState.signedIn) FoundryColors.GreenBg else Color.White,
+                badgeInk = if (agyAuthState.signedIn) FoundryColors.GreenInk else FoundryColors.InkSecondary,
+                expanded = expandAgySection,
+                onToggle = { expandAgySection = !expandAgySection },
+            ) {
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .clip(RoundedCornerShape(18.dp))
-                    .background(FoundryColors.SidebarBg)
-                    .border(1.dp, FoundryColors.Border, RoundedCornerShape(18.dp))
-                    .padding(14.dp),
+                    .padding(top = 8.dp),
             ) {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -398,12 +419,12 @@ fun SettingsDialog(
                         Icon(Icons.Rounded.Terminal, contentDescription = null, tint = FoundryColors.InkPrimary, modifier = Modifier.size(18.dp))
                         Spacer(Modifier.width(7.dp))
                         Column {
-                            Text("Antigravity CLI (On-Device)", style = MaterialTheme.typography.titleMedium)
+                            Text("CLI Runtime", fontSize = 12.5.sp, fontWeight = FontWeight.SemiBold, color = FoundryColors.InkPrimary)
                             Text(
                                 text = when {
                                     !agyCliStatus.supportedAbi -> "ARM64 Android required"
-                                    agyCliStatus.installed -> "Installed · ${agyCliStatus.version.ifBlank { "ready" }}"
-                                    else -> "Not installed (~native binary, 0 Termux)"
+                                    agyCliStatus.installed -> "Binary ${agyCliStatus.version.ifBlank { "ready" }}"
+                                    else -> "Not installed yet"
                                 },
                                 style = MaterialTheme.typography.labelSmall,
                                 color = if (agyCliStatus.installed) FoundryColors.GreenInk else FoundryColors.InkSecondary,
@@ -645,48 +666,55 @@ fun SettingsDialog(
                         }
                     }
 
-                    // Live Quota Bars (5h & Weekly)
+                    // Live Quota Bars (5h & Weekly) — Collapsible
                     if (agyQuotaGroups.isNotEmpty()) {
                         Spacer(Modifier.height(10.dp))
-                        Text("Account Quota Windows", fontSize = 11.5.sp, fontWeight = FontWeight.SemiBold, color = FoundryColors.InkSecondary)
-                        Spacer(Modifier.height(4.dp))
-                        Column(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clip(RoundedCornerShape(12.dp))
-                                .background(Color.White)
-                                .border(1.dp, FoundryColors.Border, RoundedCornerShape(12.dp))
-                                .padding(10.dp),
-                            verticalArrangement = Arrangement.spacedBy(8.dp),
-                        ) {
-                            agyQuotaGroups.forEach { group ->
-                                val buckets = listOfNotNull(group.fiveHour, group.weekly)
-                                if (buckets.isNotEmpty()) {
-                                    Text(group.groupName, fontSize = 11.5.sp, fontWeight = FontWeight.SemiBold, color = FoundryColors.InkPrimary)
-                                    buckets.forEach { b ->
-                                        val pct = (b.remainingFraction.coerceIn(0f, 1f) * 100f).toInt()
-                                        val barColor = when {
-                                            pct >= 40 -> FoundryColors.GreenInk
-                                            pct >= 15 -> FoundryColors.AmberInk
-                                            else -> FoundryColors.RedInk
-                                        }
-                                        Column {
-                                            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                                                Text(b.displayName.ifBlank { b.window }, fontSize = 11.sp, color = FoundryColors.InkSecondary)
-                                                Text(
-                                                    text = if (b.countdown.isNotBlank()) "${b.remainingPct} · ${b.countdown}" else b.remainingPct,
-                                                    fontSize = 11.sp,
-                                                    fontWeight = FontWeight.SemiBold,
+                        CollapsibleMiniHeader(
+                            title = "Account Quota Windows",
+                            badge = "${agyQuotaGroups.size} group(s)",
+                            expanded = expandAgyQuotas,
+                            onToggle = { expandAgyQuotas = !expandAgyQuotas },
+                        )
+                        AnimatedVisibility(visible = expandAgyQuotas) {
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(top = 6.dp)
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .background(Color.White)
+                                    .border(1.dp, FoundryColors.Border, RoundedCornerShape(12.dp))
+                                    .padding(10.dp),
+                                verticalArrangement = Arrangement.spacedBy(8.dp),
+                            ) {
+                                agyQuotaGroups.forEach { group ->
+                                    val buckets = listOfNotNull(group.fiveHour, group.weekly)
+                                    if (buckets.isNotEmpty()) {
+                                        Text(group.groupName, fontSize = 11.5.sp, fontWeight = FontWeight.SemiBold, color = FoundryColors.InkPrimary)
+                                        buckets.forEach { b ->
+                                            val pct = (b.remainingFraction.coerceIn(0f, 1f) * 100f).toInt()
+                                            val barColor = when {
+                                                pct >= 40 -> FoundryColors.GreenInk
+                                                pct >= 15 -> FoundryColors.AmberInk
+                                                else -> FoundryColors.RedInk
+                                            }
+                                            Column {
+                                                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                                                    Text(b.displayName.ifBlank { b.window }, fontSize = 11.sp, color = FoundryColors.InkSecondary)
+                                                    Text(
+                                                        text = if (b.countdown.isNotBlank()) "${b.remainingPct} · ${b.countdown}" else b.remainingPct,
+                                                        fontSize = 11.sp,
+                                                        fontWeight = FontWeight.SemiBold,
+                                                        color = barColor,
+                                                    )
+                                                }
+                                                Spacer(Modifier.height(3.dp))
+                                                LinearProgressIndicator(
+                                                    progress = { b.remainingFraction.coerceIn(0f, 1f) },
+                                                    modifier = Modifier.fillMaxWidth().height(5.dp).clip(RoundedCornerShape(999.dp)),
                                                     color = barColor,
+                                                    trackColor = FoundryColors.SoftSurface,
                                                 )
                                             }
-                                            Spacer(Modifier.height(3.dp))
-                                            LinearProgressIndicator(
-                                                progress = { b.remainingFraction.coerceIn(0f, 1f) },
-                                                modifier = Modifier.fillMaxWidth().height(5.dp).clip(RoundedCornerShape(999.dp)),
-                                                color = barColor,
-                                                trackColor = FoundryColors.SoftSurface,
-                                            )
                                         }
                                     }
                                 }
@@ -694,121 +722,118 @@ fun SettingsDialog(
                         }
                     }
 
-                    // Antigravity Models + Per-Model Quotas
+                    // Antigravity Models + Per-Model Quotas — Collapsible under bold title & arrow button
                     if (agyModels.isNotEmpty()) {
                         Spacer(Modifier.height(10.dp))
-                        Text("Antigravity Models & Quotas (${agyModels.size})", fontSize = 11.5.sp, fontWeight = FontWeight.SemiBold, color = FoundryColors.InkSecondary)
-                        Spacer(Modifier.height(4.dp))
-                        Column(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clip(RoundedCornerShape(12.dp))
-                                .background(Color.White)
-                                .border(1.dp, FoundryColors.Border, RoundedCornerShape(12.dp)),
-                        ) {
-                            agyModels.forEachIndexed { idx, m ->
-                                val isChosen = m.id == agySelectedModel
-                                val qPct = m.remainingFraction?.let { (it.coerceIn(0f, 1f) * 100f).toInt() }
-                                val qColor = when {
-                                    qPct == null -> FoundryColors.InkSecondary
-                                    qPct >= 40 -> FoundryColors.GreenInk
-                                    qPct >= 15 -> FoundryColors.AmberInk
-                                    else -> FoundryColors.RedInk
-                                }
-                                Row(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .background(if (isChosen) FoundryColors.SoftSurface else Color.White)
-                                        .clickable { onSelectAgyModel(m.id) }
-                                        .padding(horizontal = 10.dp, vertical = 8.dp),
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.SpaceBetween,
-                                ) {
-                                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
-                                        if (isChosen) {
-                                            Icon(Icons.Rounded.Check, contentDescription = null, tint = FoundryColors.GreenInk, modifier = Modifier.size(15.dp))
-                                            Spacer(Modifier.width(5.dp))
-                                        }
-                                        Column {
-                                            Text(
-                                                text = m.displayName.ifBlank { m.id },
-                                                fontSize = 12.sp,
-                                                fontWeight = if (isChosen) FontWeight.Bold else FontWeight.Medium,
-                                                color = FoundryColors.InkPrimary,
-                                                maxLines = 1,
-                                                overflow = TextOverflow.Ellipsis,
-                                            )
-                                            Text(
-                                                text = m.id,
-                                                fontSize = 10.5.sp,
-                                                color = FoundryColors.InkMuted,
-                                                maxLines = 1,
-                                                overflow = TextOverflow.Ellipsis,
-                                            )
-                                        }
+                        CollapsibleMiniHeader(
+                            title = "Antigravity Models (${agyModels.size})",
+                            badge = agySelectedModel.ifBlank { "Select" },
+                            expanded = expandAgyModels,
+                            onToggle = { expandAgyModels = !expandAgyModels },
+                        )
+                        AnimatedVisibility(visible = expandAgyModels) {
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(top = 6.dp)
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .background(Color.White)
+                                    .border(1.dp, FoundryColors.Border, RoundedCornerShape(12.dp)),
+                            ) {
+                                agyModels.forEachIndexed { idx, m ->
+                                    val isChosen = m.id == agySelectedModel
+                                    val qPct = m.remainingFraction?.let { (it.coerceIn(0f, 1f) * 100f).toInt() }
+                                    val qColor = when {
+                                        qPct == null -> FoundryColors.InkSecondary
+                                        qPct >= 40 -> FoundryColors.GreenInk
+                                        qPct >= 15 -> FoundryColors.AmberInk
+                                        else -> FoundryColors.RedInk
                                     }
-                                    Spacer(Modifier.width(8.dp))
-                                    Text(
-                                        text = when {
-                                            qPct != null && m.resetCountdown.isNotBlank() -> "$qPct% · ${m.resetCountdown}"
-                                            qPct != null -> "$qPct%"
-                                            else -> "Ready"
-                                        },
-                                        fontSize = 11.sp,
-                                        fontWeight = FontWeight.SemiBold,
-                                        color = qColor,
-                                        maxLines = 1,
-                                        softWrap = false,
+                                    Row(
                                         modifier = Modifier
-                                            .clip(RoundedCornerShape(999.dp))
-                                            .background(FoundryColors.SidebarBg)
-                                            .padding(horizontal = 8.dp, vertical = 4.dp),
-                                    )
-                                }
-                                if (idx < agyModels.lastIndex) {
-                                    HorizontalDivider(color = FoundryColors.Border, thickness = 0.5.dp)
+                                            .fillMaxWidth()
+                                            .background(if (isChosen) FoundryColors.SoftSurface else Color.White)
+                                            .clickable { onSelectAgyModel(m.id) }
+                                            .padding(horizontal = 10.dp, vertical = 8.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                    ) {
+                                        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
+                                            if (isChosen) {
+                                                Icon(Icons.Rounded.Check, contentDescription = null, tint = FoundryColors.GreenInk, modifier = Modifier.size(15.dp))
+                                                Spacer(Modifier.width(5.dp))
+                                            }
+                                            Column {
+                                                Text(
+                                                    text = m.displayName.ifBlank { m.id },
+                                                    fontSize = 12.sp,
+                                                    fontWeight = if (isChosen) FontWeight.Bold else FontWeight.Medium,
+                                                    color = FoundryColors.InkPrimary,
+                                                    maxLines = 1,
+                                                    overflow = TextOverflow.Ellipsis,
+                                                )
+                                                Text(
+                                                    text = m.id,
+                                                    fontSize = 10.5.sp,
+                                                    color = FoundryColors.InkMuted,
+                                                    maxLines = 1,
+                                                    overflow = TextOverflow.Ellipsis,
+                                                )
+                                            }
+                                        }
+                                        Spacer(Modifier.width(8.dp))
+                                        Text(
+                                            text = when {
+                                                qPct != null && m.resetCountdown.isNotBlank() -> "$qPct% · ${m.resetCountdown}"
+                                                qPct != null -> "$qPct%"
+                                                else -> "Ready"
+                                            },
+                                            fontSize = 11.sp,
+                                            fontWeight = FontWeight.SemiBold,
+                                            color = qColor,
+                                            maxLines = 1,
+                                            softWrap = false,
+                                            modifier = Modifier
+                                                .clip(RoundedCornerShape(999.dp))
+                                                .background(FoundryColors.SidebarBg)
+                                                .padding(horizontal = 8.dp, vertical = 4.dp),
+                                        )
+                                    }
+                                    if (idx < agyModels.lastIndex) {
+                                        HorizontalDivider(color = FoundryColors.Border, thickness = 0.5.dp)
+                                    }
                                 }
                             }
                         }
                     }
                 }
             }
+            }
 
-            Spacer(Modifier.height(14.dp))
-            HorizontalDivider(color = FoundryColors.Border)
-            Spacer(Modifier.height(12.dp))
+            Spacer(Modifier.height(10.dp))
 
-            // === PRE-CONFIGURED PLUGINS & APPS (CHATGPT STYLE -> CONNECT VIA IN-APP BROWSER) ===
+            // === 2. PRE-CONFIGURED PLUGINS & APPS (COLLAPSIBLE) ===
             var expandedPluginId by remember { mutableStateOf<String?>(null) }
             var pluginTokenDraft by remember { mutableStateOf("") }
             var pluginClientIdDraft by remember { mutableStateOf("") }
+            val activePluginsCount = plugins.count { it.connected }
 
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween,
+            CollapsibleSectionHeader(
+                title = "Plugins & Apps",
+                subtitle = "Notion, Slack, GitHub, Gmail, Figma, Canva, Browser...",
+                badgeText = "$activePluginsCount/${plugins.size} active",
+                badgeBg = if (activePluginsCount > 0) FoundryColors.GreenBg else Color.White,
+                badgeInk = if (activePluginsCount > 0) FoundryColors.GreenInk else FoundryColors.InkSecondary,
+                expanded = expandPluginsSection,
+                onToggle = { expandPluginsSection = !expandPluginsSection },
             ) {
-                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
-                    Icon(Icons.Rounded.Extension, contentDescription = null, tint = FoundryColors.InkPrimary, modifier = Modifier.size(18.dp))
-                    Spacer(Modifier.width(7.dp))
-                    Column {
-                        Text("Plugins & Apps (${plugins.count { it.connected }}/${plugins.size} active)", style = MaterialTheme.typography.titleMedium)
-                        Text(
-                            "Pre-configured for CEO & all bots · Connect in CEO Browser",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = FoundryColors.InkSecondary,
-                        )
-                    }
-                }
-            }
-            Spacer(Modifier.height(8.dp))
-
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .clip(RoundedCornerShape(16.dp))
-                    .background(FoundryColors.SidebarBg)
-                    .border(1.dp, FoundryColors.Border, RoundedCornerShape(16.dp)),
+                    .padding(top = 8.dp)
+                    .clip(RoundedCornerShape(14.dp))
+                    .background(Color.White)
+                    .border(1.dp, FoundryColors.Border, RoundedCornerShape(14.dp)),
             ) {
                 plugins.forEachIndexed { idx, ps ->
                     val def = ps.definition
@@ -983,11 +1008,22 @@ fun SettingsDialog(
                     }
                 }
             }
+            }
 
-            Spacer(Modifier.height(14.dp))
-            HorizontalDivider(color = FoundryColors.Border)
-            Spacer(Modifier.height(12.dp))
-            Text("External API Keys (Optional Fallback)", style = MaterialTheme.typography.titleMedium)
+            Spacer(Modifier.height(10.dp))
+
+            // === 3. EXTERNAL API KEYS / CUSTOM PROVIDERS (COLLAPSIBLE) ===
+            val configuredProvidersCount = providers.count { it.configured }
+            CollapsibleSectionHeader(
+                title = "External API Keys & Custom LLMs",
+                subtitle = "OpenRouter, Gemini, OpenAI, Anthropic, Custom endpoints",
+                badgeText = if (configuredProvidersCount > 0) "$configuredProvidersCount key(s)" else "Optional",
+                badgeBg = if (configuredProvidersCount > 0) FoundryColors.GreenBg else Color.White,
+                badgeInk = if (configuredProvidersCount > 0) FoundryColors.GreenInk else FoundryColors.InkSecondary,
+                expanded = expandExternalLlmSection,
+                onToggle = { expandExternalLlmSection = !expandExternalLlmSection },
+            ) {
+            Column(modifier = Modifier.fillMaxWidth().padding(top = 8.dp)) {
             Spacer(Modifier.height(8.dp))
 
             Row(
@@ -1301,18 +1337,20 @@ fun SettingsDialog(
                     }
                 }
             }
+            }
+            }
 
-            Spacer(Modifier.height(16.dp))
-            HorizontalDivider(color = FoundryColors.Border)
-            Spacer(Modifier.height(12.dp))
+            Spacer(Modifier.height(10.dp))
 
-            Text("Company API Connectors (${connectors.size})", style = MaterialTheme.typography.titleMedium)
-            Text(
-                "Attach any REST API (Shopify, GitHub, Stripe, WooCommerce...) to the active sandbox.",
-                style = MaterialTheme.typography.labelSmall,
-                color = FoundryColors.InkSecondary,
-            )
-            Spacer(Modifier.height(8.dp))
+            // === 4. COMPANY API CONNECTORS (COLLAPSIBLE) ===
+            CollapsibleSectionHeader(
+                title = "Company REST Connectors",
+                subtitle = "Attach Shopify, Stripe or Webhook endpoints to sandbox",
+                badgeText = "${connectors.size} active",
+                expanded = expandConnectorsSection,
+                onToggle = { expandConnectorsSection = !expandConnectorsSection },
+            ) {
+            Column(modifier = Modifier.fillMaxWidth().padding(top = 8.dp)) {
             OutlinedTextField(
                 value = connName,
                 onValueChange = { connName = it },
@@ -1361,30 +1399,164 @@ fun SettingsDialog(
             ) {
                 Text("Attach Connector to Sandbox", color = FoundryColors.InkPrimary)
             }
-
-            Spacer(Modifier.height(16.dp))
-            HorizontalDivider(color = FoundryColors.Border)
-            Spacer(Modifier.height(12.dp))
-
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(14.dp))
-                    .background(FoundryColors.RedBg)
-                    .padding(12.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
-                    Icon(Icons.Rounded.Warning, contentDescription = null, tint = FoundryColors.RedInk)
-                    Spacer(Modifier.width(8.dp))
-                    Column {
-                        Text("Global Kill Switch", fontWeight = FontWeight.Bold, color = FoundryColors.RedInk, fontSize = 13.5.sp)
-                        Text("Freeze all bots immediately", fontSize = 11.5.sp, color = FoundryColors.InkSecondary)
-                    }
-                }
-                Switch(checked = killSwitch, onCheckedChange = onToggleKillSwitch)
             }
+            }
+
+            Spacer(Modifier.height(10.dp))
+
+            // === 5. SECURITY & GLOBAL KILL SWITCH (COLLAPSIBLE) ===
+            CollapsibleSectionHeader(
+                title = "Safety & Kill Switch",
+                subtitle = "Emergency freeze for all bots & active CLI processes",
+                badgeText = if (killSwitch) "FROZEN" else "Armed",
+                badgeBg = if (killSwitch) FoundryColors.RedBg else Color.White,
+                badgeInk = if (killSwitch) FoundryColors.RedInk else FoundryColors.InkSecondary,
+                expanded = expandSafetySection,
+                onToggle = { expandSafetySection = !expandSafetySection },
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 8.dp)
+                        .clip(RoundedCornerShape(14.dp))
+                        .background(FoundryColors.RedBg)
+                        .padding(12.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
+                        Icon(Icons.Rounded.Warning, contentDescription = null, tint = FoundryColors.RedInk)
+                        Spacer(Modifier.width(8.dp))
+                        Column {
+                            Text("Global Kill Switch", fontWeight = FontWeight.Bold, color = FoundryColors.RedInk, fontSize = 13.5.sp)
+                            Text("Freeze all bots immediately", fontSize = 11.5.sp, color = FoundryColors.InkSecondary)
+                        }
+                    }
+                    Switch(checked = killSwitch, onCheckedChange = onToggleKillSwitch)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun CollapsibleSectionHeader(
+    title: String,
+    subtitle: String = "",
+    badgeText: String? = null,
+    badgeBg: Color = Color.White,
+    badgeInk: Color = FoundryColors.InkSecondary,
+    expanded: Boolean,
+    onToggle: () -> Unit,
+    content: @Composable () -> Unit,
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(18.dp))
+            .background(FoundryColors.SidebarBg)
+            .border(1.dp, FoundryColors.Border, RoundedCornerShape(18.dp))
+            .padding(12.dp),
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(12.dp))
+                .clickable { onToggle() }
+                .padding(horizontal = 2.dp, vertical = 2.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween,
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(title, style = MaterialTheme.typography.titleMedium, color = FoundryColors.InkPrimary)
+                if (subtitle.isNotBlank()) {
+                    Text(
+                        text = subtitle,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = FoundryColors.InkSecondary,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+            }
+            Spacer(Modifier.width(8.dp))
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                if (!badgeText.isNullOrBlank()) {
+                    Text(
+                        text = badgeText,
+                        fontSize = 10.5.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = badgeInk,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(999.dp))
+                            .background(badgeBg)
+                            .padding(horizontal = 8.dp, vertical = 4.dp),
+                    )
+                }
+                Box(
+                    modifier = Modifier
+                        .size(30.dp)
+                        .clip(RoundedCornerShape(999.dp))
+                        .background(Color.White)
+                        .border(1.dp, FoundryColors.Border, RoundedCornerShape(999.dp))
+                        .clickable { onToggle() },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(
+                        imageVector = if (expanded) Icons.Rounded.KeyboardArrowUp else Icons.Rounded.KeyboardArrowDown,
+                        contentDescription = if (expanded) "Collapse" else "Expand",
+                        tint = FoundryColors.InkPrimary,
+                        modifier = Modifier.size(18.dp),
+                    )
+                }
+            }
+        }
+        AnimatedVisibility(visible = expanded) {
+            content()
+        }
+    }
+}
+
+@Composable
+private fun CollapsibleMiniHeader(
+    title: String,
+    badge: String,
+    expanded: Boolean,
+    onToggle: () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(12.dp))
+            .background(Color.White)
+            .border(1.dp, FoundryColors.Border, RoundedCornerShape(12.dp))
+            .clickable { onToggle() }
+            .padding(horizontal = 10.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.SpaceBetween,
+    ) {
+        Text(title, fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = FoundryColors.InkPrimary, modifier = Modifier.weight(1f))
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            Text(
+                text = badge,
+                fontSize = 10.5.sp,
+                fontWeight = FontWeight.Medium,
+                color = FoundryColors.InkSecondary,
+                maxLines = 1,
+                softWrap = false,
+                modifier = Modifier
+                    .clip(RoundedCornerShape(999.dp))
+                    .background(FoundryColors.SidebarBg)
+                    .padding(horizontal = 8.dp, vertical = 3.dp),
+            )
+            Icon(
+                imageVector = if (expanded) Icons.Rounded.KeyboardArrowUp else Icons.Rounded.KeyboardArrowDown,
+                contentDescription = if (expanded) "Collapse" else "Expand",
+                tint = FoundryColors.InkPrimary,
+                modifier = Modifier.size(18.dp),
+            )
         }
     }
 }

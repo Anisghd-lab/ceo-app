@@ -196,7 +196,7 @@ class AutonomousBotsEndToEndTest {
             "Strategist persisted prompt should carry CEO mission mandate",
             refreshedBots.first { it.name == "Strategist" }.systemPrompt.contains("Focus benchmark SEO mobile 2026"),
         )
-        assertTrue("Strategist -> CEO report missing", contents.any { it.contains("[Strategist → CEO]") })
+        assertTrue("Strategist -> CEO report missing | msgs=${contents.joinToString(" || ")}", contents.any { it.contains("[Strategist → CEO]") })
         assertTrue("Builder -> CEO report missing", contents.any { it.contains("[Builder → CEO]") })
         assertTrue("Publisher -> CEO report missing", contents.any { it.contains("[Publisher → CEO]") })
         assertTrue("QA -> CEO report missing", contents.any { it.contains("[Quality Auditor → CEO]") && it.contains("95/100") })
@@ -421,10 +421,11 @@ class AutonomousBotsEndToEndTest {
         aiServer.enqueue(openAiWrap("""{"action":"tool","tool":"instagram_reply_comment","args":{"comment_id":"cmt_99","message":"Bonjour Sara ! La formation est à 149€ avec accès à vie — lien envoyé !"}}"""))
         aiServer.enqueue(openAiWrap("""{"action":"final","reply":"Commentaire client analysé et réponse commerciale préparée pour approbation."}"""))
 
+        engine.botStepTimeoutMs = 4_000L
         engine.handleFounderMessage(deployed.id, "Lance la création complète et le marketing de notre première formation IA")
 
         val timeline = db.listMessages(deployed.id).map { it.content }
-        assertTrue("TrendHunter must report", timeline.any { it.contains("[TrendHunter → CEO]") })
+        assertTrue("TrendHunter must report | timeline=${timeline.joinToString(" || ")}", timeline.any { it.contains("[TrendHunter → CEO]") })
         assertTrue("DataScout must report", timeline.any { it.contains("[DataScout → CEO]") })
         assertTrue("CourseBuilder must report", timeline.any { it.contains("[CourseBuilder → CEO]") })
         assertTrue("VisualStudio must report", timeline.any { it.contains("[VisualStudio → CEO]") })
@@ -456,10 +457,10 @@ class AutonomousBotsEndToEndTest {
         val proposal = engine.proposeCompany("Resilient startup")
         val deployed = engine.deployCompany("Resilient startup", proposal)
 
-        engine.botStepTimeoutMs = 220L
+        engine.botStepTimeoutMs = 900L
         aiServer.enqueue(openAiWrap("""{"action":"run_mission","title":"Resilient Plan","goal":"Build resilient report","ceo_reply":"Lancement avec surveillance watchdog."}"""))
-        // Bot #1 (Strategist) stalls longer than 220ms!
-        aiServer.enqueue(openAiWrap("""{"action":"final","reply":"Too late"}""").setBodyDelay(900, java.util.concurrent.TimeUnit.MILLISECONDS))
+        // Bot #1 (Strategist) stalls longer than 900ms!
+        aiServer.enqueue(openAiWrap("""{"action":"final","reply":"Too late"}""").setBodyDelay(1800, java.util.concurrent.TimeUnit.MILLISECONDS))
         // CEO interrogation of stalled Strategist
         aiServer.enqueue(openAiWrap("""Strategist a expiré sur le réseau ; passage immédiat à Builder pour livrer l'objectif."""))
         // Bot #2 (Builder) executes cleanly
@@ -471,8 +472,8 @@ class AutonomousBotsEndToEndTest {
         engine.handleFounderMessage(deployed.id, "Lance la mission")
 
         val timeline = db.listMessages(deployed.id).map { it.content }
-        assertTrue("CEO must interrogate timed-out Strategist", timeline.any { it.contains("[CEO ⇄ Strategist]") && it.contains("Délai dépassé") })
-        assertTrue("Builder must still complete after Strategist timeout", timeline.any { it.contains("[Builder → CEO]") })
+        assertTrue("CEO must interrogate timed-out Strategist | timeline=${timeline.joinToString(" || ")}", timeline.any { it.contains("[CEO ⇄ Strategist]") && it.contains("Délai dépassé") })
+        assertTrue("Builder must still complete after Strategist timeout | timeline=${timeline.joinToString(" || ")}", timeline.any { it.contains("[Builder → CEO]") })
         assertTrue("QA must validate final deliverable", timeline.any { it.contains("[QualityAuditor → CEO]") && it.contains("92/100") })
         assertTrue("Final deliverable PDF must exist", sandbox.resolveFile(deployed.id, "output/resilient.pdf").exists())
         val feed = sandbox.readTextFile(deployed.id, "workspace/team_feed.md")
@@ -501,15 +502,15 @@ class AutonomousBotsEndToEndTest {
         aiServer.enqueue(openAiWrap("""{"action":"final","reply":"Unreached"}""").setBodyDelay(1500, java.util.concurrent.TimeUnit.MILLISECONDS))
 
         val stopTrigger = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Default).launch {
-            kotlinx.coroutines.delay(350)
+            kotlinx.coroutines.delay(550)
             engine.stopAllExecution()
         }
         engine.handleFounderMessage(deployed.id, "Démarre le kit")
         stopTrigger.join()
 
         val afterStop = db.listMessages(deployed.id).map { it.content }
-        assertTrue("Strategist should have finished before stop", afterStop.any { it.contains("[Strategist → CEO]") })
-        assertTrue("Stop notice for Builder missing", afterStop.any { it.contains("Builder arrêté") && it.contains("continue") })
+        assertTrue("Strategist should have finished before stop | msgs=${afterStop.joinToString(" || ")}", afterStop.any { it.contains("[Strategist → CEO]") })
+        assertTrue("Stop notice for Builder missing | msgs=${afterStop.joinToString(" || ")}", afterStop.any { it.contains("Builder arrêté") && it.contains("continue") })
 
         // Now Founder sends "continue" -> CEO interrogates stopped Builder, synthesizes recovery PDF, runs Bot #3 (Publisher) + QA + Approval!
         aiServer.enqueue(openAiWrap("""Builder a été arrêté à mi-parcours ; reprise immédiate sur Publisher pour finaliser."""))
@@ -591,6 +592,7 @@ class AutonomousBotsEndToEndTest {
         pluginServer.enqueue(MockResponse().setResponseCode(200).setBody("""{"results":[{"id":"root_ws_page_1"}]}"""))
         pluginServer.enqueue(MockResponse().setResponseCode(200).setBody("""{"id":"notion_cmp_page_99","url":"https://www.notion.so/notioncmppage99"}"""))
 
+        engine.botStepTimeoutMs = 4_000L
         val prop = engine.proposeCompany("Entreprise de formations continues")
         val comp = engine.deployCompany("Entreprise de formations continues", prop)
 

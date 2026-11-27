@@ -285,7 +285,7 @@ class AgyRuntimeManager(private val context: Context) {
                     val planInfo = planStatus?.optJSONObject("planInfo")
                         ?: planStatus?.optJSONObject("plan_info")
                         ?: userStatus.optJSONObject("planInfo")
-                        ?: userResp.optJSONObject("planInfo")
+                        ?: userResp?.optJSONObject("planInfo")
                     planName = planInfo?.optString("planName").orEmpty().ifBlank { planInfo?.optString("plan_name").orEmpty() }
                 }
                 // Auto-save newly signed-in account if not saved yet

@@ -117,7 +117,6 @@ class OnDeviceSandbox(private val context: Context) {
         val bodyPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
             color = Color.parseColor("#1F2937")
             textSize = 11f
-            lineSpacing(0f, 1.35f)
             typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.NORMAL)
         }
         val dividerPaint = Paint().apply {

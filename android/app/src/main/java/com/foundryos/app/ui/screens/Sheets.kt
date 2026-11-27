@@ -3,6 +3,7 @@ package com.foundryos.app.ui.screens
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -53,8 +54,8 @@ import com.foundryos.app.ui.components.CompanyOrgCard
 import com.foundryos.app.ui.theme.FoundryColors
 
 /**
- * 100% Free-form Company Founding Dialog:
- * Describe ANY business -> CEO dynamically designs the bot org-chart -> Deploy isolated sandbox.
+ * 100% Free-form Company Founding Dialog (zero hardcoded industry):
+ * Describe ANY business -> CEO dynamically designs the bot org-chart -> Deploy isolated sandbox on-device.
  */
 @Composable
 fun CreateCompanyDialog(
@@ -85,10 +86,10 @@ fun CreateCompanyDialog(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Column {
+                Column(modifier = Modifier.weight(1f)) {
                     Text("Found a new company", style = MaterialTheme.typography.titleLarge)
                     Text(
-                        "1 Sandbox = 1 Company · CEO designs the exact team",
+                        "1 Sandbox = 1 Company · On-device CEO designs the team",
                         style = MaterialTheme.typography.labelMedium,
                         color = FoundryColors.InkSecondary,
                     )
@@ -105,7 +106,7 @@ fun CreateCompanyDialog(
                 onValueChange = { description = it },
                 label = { Text("Describe your company freely") },
                 placeholder = {
-                    Text("Ex: Create a digital products company that crafts high-quality PDFs, verifies them via QA, and prepares store listings — or any other business...")
+                    Text("Ex: Create a digital products company that creates quality PDFs, verifies them, and prepares store listings — or any other business...")
                 },
                 minLines = 3,
                 maxLines = 5,
@@ -198,7 +199,7 @@ fun ArtifactsDialog(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Column {
+                Column(modifier = Modifier.weight(1f)) {
                     Text("Sandbox Deliverables", style = MaterialTheme.typography.titleLarge)
                     Text(companyName, style = MaterialTheme.typography.labelMedium, color = FoundryColors.InkSecondary)
                 }
@@ -226,24 +227,23 @@ fun ArtifactsDialog(
 
 @Composable
 fun SettingsDialog(
-    serverUrl: String,
-    pairingToken: String,
-    connectionStatus: String,
-    isLive: Boolean,
+    engineSummary: String,
+    hasAnyKey: Boolean,
     providers: List<ProviderStatus>,
     connectors: List<ConnectorItem>,
     killSwitch: Boolean,
-    onSaveConnection: (String, String) -> Unit,
-    onSaveProvider: (String, String, String) -> Unit,
+    isTestingKey: Boolean,
+    testResult: String?,
+    onSaveAndTestProvider: (String, String, String) -> Unit,
     onAddConnector: (String, String, String, Boolean) -> Unit,
     onToggleKillSwitch: (Boolean) -> Unit,
     onDismiss: () -> Unit,
 ) {
-    var urlInput by remember { mutableStateOf(serverUrl) }
-    var tokenInput by remember { mutableStateOf(pairingToken) }
     var selectedProvider by remember { mutableStateOf("openrouter") }
     var apiKeyInput by remember { mutableStateOf("") }
-    var modelInput by remember { mutableStateOf("anthropic/claude-3.5-sonnet") }
+    var modelInput by remember {
+        mutableStateOf(providers.firstOrNull { it.name == "openrouter" }?.model ?: "anthropic/claude-3.5-sonnet")
+    }
 
     var connName by remember { mutableStateOf("") }
     var connUrl by remember { mutableStateOf("") }
@@ -268,106 +268,115 @@ fun SettingsDialog(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Text("CEO Kernel & Keys", style = MaterialTheme.typography.titleLarge)
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("CEO Engine & Keys", style = MaterialTheme.typography.titleLarge)
+                    Text(
+                        "100% On-Device · No VPS needed",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = FoundryColors.InkSecondary,
+                    )
+                }
                 IconButton(onClick = onDismiss) {
                     Icon(Icons.Rounded.Close, contentDescription = "Close")
                 }
             }
 
-            // Status pill
+            Spacer(Modifier.height(6.dp))
+
+            // On-Device Engine Status Pill
             Text(
-                text = connectionStatus,
+                text = engineSummary,
                 fontSize = 12.sp,
                 fontWeight = FontWeight.Medium,
-                color = if (isLive) FoundryColors.GreenInk else FoundryColors.AmberInk,
+                color = if (hasAnyKey) FoundryColors.GreenInk else FoundryColors.AmberInk,
                 modifier = Modifier
                     .clip(RoundedCornerShape(999.dp))
-                    .background(if (isLive) FoundryColors.GreenBg else Color(0xFFFFFBEB))
-                    .padding(horizontal = 10.dp, vertical = 4.dp),
+                    .background(if (hasAnyKey) FoundryColors.GreenBg else Color(0xFFFFFBEB))
+                    .padding(horizontal = 12.dp, vertical = 5.dp),
             )
 
-            Spacer(Modifier.height(12.dp))
-            OutlinedTextField(
-                value = urlInput,
-                onValueChange = { urlInput = it },
-                label = { Text("Kernel Server URL") },
-                singleLine = true,
-                modifier = Modifier.fillMaxWidth(),
-            )
+            Spacer(Modifier.height(14.dp))
+
+            Text("Multi-LLM Router (Direct from Phone)", style = MaterialTheme.typography.titleMedium)
             Spacer(Modifier.height(8.dp))
-            OutlinedTextField(
-                value = tokenInput,
-                onValueChange = { tokenInput = it },
-                label = { Text("Pairing Token (data/pairing.token)") },
-                singleLine = true,
-                modifier = Modifier.fillMaxWidth(),
-            )
-            Spacer(Modifier.height(8.dp))
-            Button(
-                onClick = { onSaveConnection(urlInput, tokenInput) },
-                shape = RoundedCornerShape(999.dp),
-                colors = ButtonDefaults.buttonColors(containerColor = FoundryColors.InkPrimary),
-                modifier = Modifier.fillMaxWidth(),
+
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                Text("Connect to Kernel")
-            }
-
-            Spacer(Modifier.height(16.dp))
-            HorizontalDivider(color = FoundryColors.Border)
-            Spacer(Modifier.height(12.dp))
-
-            Text("Multi-LLM Router", style = MaterialTheme.typography.titleMedium)
-            Spacer(Modifier.height(6.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                listOf("openrouter", "gemini", "xai", "openai", "anthropic").forEach { prov ->
-                    val active = selectedProvider == prov
-                    val configured = providers.any { it.name == prov && it.configured }
+                providers.forEach { p ->
+                    val active = selectedProvider == p.name
                     Box(
                         modifier = Modifier
                             .clip(RoundedCornerShape(999.dp))
                             .background(if (active) FoundryColors.InkPrimary else FoundryColors.SoftSurface)
                             .clickable {
-                                selectedProvider = prov
-                                modelInput = providers.firstOrNull { it.name == prov }?.model ?: modelInput
+                                selectedProvider = p.name
+                                modelInput = p.model
                             }
-                            .padding(horizontal = 10.dp, vertical = 6.dp),
+                            .padding(horizontal = 12.dp, vertical = 7.dp),
                     ) {
                         Text(
-                            text = if (configured) "$prov ✓" else prov,
-                            fontSize = 11.sp,
+                            text = if (p.configured) "${p.name} ✓" else p.name,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Medium,
+                            maxLines = 1,
                             color = if (active) Color.White else FoundryColors.InkPrimary,
                         )
                     }
                 }
             }
-            Spacer(Modifier.height(8.dp))
+
+            Spacer(Modifier.height(10.dp))
             OutlinedTextField(
                 value = apiKeyInput,
                 onValueChange = { apiKeyInput = it },
                 label = { Text("$selectedProvider API Key") },
+                placeholder = { Text("Paste your API key here") },
                 singleLine = true,
+                shape = RoundedCornerShape(12.dp),
                 modifier = Modifier.fillMaxWidth(),
             )
-            Spacer(Modifier.height(6.dp))
+            Spacer(Modifier.height(8.dp))
             OutlinedTextField(
                 value = modelInput,
                 onValueChange = { modelInput = it },
                 label = { Text("Default Model") },
                 singleLine = true,
+                shape = RoundedCornerShape(12.dp),
                 modifier = Modifier.fillMaxWidth(),
             )
-            Spacer(Modifier.height(8.dp))
-            OutlinedButton(
+            Spacer(Modifier.height(10.dp))
+            Button(
                 onClick = {
-                    if (apiKeyInput.isNotBlank()) {
-                        onSaveProvider(selectedProvider, apiKeyInput.trim(), modelInput.trim())
+                    if (apiKeyInput.isNotBlank() && !isTestingKey) {
+                        onSaveAndTestProvider(selectedProvider, apiKeyInput.trim(), modelInput.trim())
                         apiKeyInput = ""
                     }
                 },
+                enabled = apiKeyInput.isNotBlank() && !isTestingKey,
                 shape = RoundedCornerShape(999.dp),
-                modifier = Modifier.fillMaxWidth(),
+                colors = ButtonDefaults.buttonColors(containerColor = FoundryColors.InkPrimary),
+                modifier = Modifier.fillMaxWidth().height(44.dp),
             ) {
-                Text("Save LLM Key", color = FoundryColors.InkPrimary)
+                if (isTestingKey) {
+                    CircularProgressIndicator(color = Color.White, strokeWidth = 2.dp, modifier = Modifier.size(16.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text("Testing key...")
+                } else {
+                    Text("Save & Verify LLM Key", fontWeight = FontWeight.SemiBold)
+                }
+            }
+
+            if (!testResult.isNullOrBlank()) {
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    text = testResult,
+                    fontSize = 12.sp,
+                    color = if (testResult.contains("✓")) FoundryColors.GreenInk else FoundryColors.RedInk,
+                )
             }
 
             Spacer(Modifier.height(16.dp))
@@ -376,16 +385,17 @@ fun SettingsDialog(
 
             Text("Company API Connectors (${connectors.size})", style = MaterialTheme.typography.titleMedium)
             Text(
-                "Attach any REST API (Shopify, GitHub, Stripe, Twenty, Dify...) to the active sandbox.",
+                "Attach any REST API (Shopify, GitHub, Stripe, WooCommerce...) to the active sandbox.",
                 style = MaterialTheme.typography.labelSmall,
                 color = FoundryColors.InkSecondary,
             )
-            Spacer(Modifier.height(6.dp))
+            Spacer(Modifier.height(8.dp))
             OutlinedTextField(
                 value = connName,
                 onValueChange = { connName = it },
                 label = { Text("Connector Name (e.g. Shopify, GitHub)") },
                 singleLine = true,
+                shape = RoundedCornerShape(12.dp),
                 modifier = Modifier.fillMaxWidth(),
             )
             Spacer(Modifier.height(6.dp))
@@ -394,14 +404,16 @@ fun SettingsDialog(
                 onValueChange = { connUrl = it },
                 label = { Text("Base URL (https://...)") },
                 singleLine = true,
+                shape = RoundedCornerShape(12.dp),
                 modifier = Modifier.fillMaxWidth(),
             )
             Spacer(Modifier.height(6.dp))
             OutlinedTextField(
                 value = connAuth,
                 onValueChange = { connAuth = it },
-                label = { Text("Authorization Header Value (Bearer ...)") },
+                label = { Text("Authorization Header (Bearer ...)") },
                 singleLine = true,
+                shape = RoundedCornerShape(12.dp),
                 modifier = Modifier.fillMaxWidth(),
             )
             Row(

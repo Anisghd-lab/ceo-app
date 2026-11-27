@@ -10,17 +10,13 @@ import android.os.Build
 import androidx.core.app.NotificationCompat
 import com.foundryos.app.MainActivity
 import com.foundryos.app.data.ApprovalItem
+import com.foundryos.app.data.FoundryRepository
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
-import okhttp3.MediaType.Companion.toMediaType
-import okhttp3.OkHttpClient
-import okhttp3.Request
-import okhttp3.RequestBody.Companion.toRequestBody
-import org.json.JSONObject
 
 object ApprovalNotifier {
-    const val CHANNEL_ID = "foundry_approvals"
+    const val CHANNEL_ID = "ceo_approvals"
     const val ACTION_DECIDE = "com.foundryos.app.ACTION_DECIDE_APPROVAL"
     const val ACTION_REFRESH_UI = "com.foundryos.app.ACTION_REFRESH_UI"
     const val EXTRA_APPROVAL_ID = "approval_id"
@@ -35,7 +31,7 @@ object ApprovalNotifier {
                 "CEO Approvals & Releases",
                 NotificationManager.IMPORTANCE_HIGH,
             ).apply {
-                description = "Human-in-the-loop release gates from your AI CEOs"
+                description = "Human-in-the-loop release gates from your on-device AI CEOs"
             }
             nm.createNotificationChannel(channel)
         }
@@ -109,24 +105,11 @@ class ApprovalActionReceiver : BroadcastReceiver() {
         val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         if (notifId != 0) nm.cancel(notifId)
 
-        val prefs = context.getSharedPreferences("foundry_prefs", Context.MODE_PRIVATE)
-        val serverUrl = prefs.getString("server_url", "http://127.0.0.1:8765")?.trimEnd('/') ?: return
-        val token = prefs.getString("pairing_token", "") ?: ""
-
         val pendingResult = goAsync()
         CoroutineScope(Dispatchers.IO).launch {
             try {
-                val client = OkHttpClient()
-                val bodyJson = JSONObject()
-                    .put("decision", decision)
-                    .put("device", "Android Notification")
-                    .toString()
-                val req = Request.Builder()
-                    .url("$serverUrl/api/approvals/$approvalId/decide")
-                    .header("X-Foundry-Token", token)
-                    .post(bodyJson.toRequestBody("application/json".toMediaType()))
-                    .build()
-                client.newCall(req).execute().close()
+                val repo = FoundryRepository(context.applicationContext)
+                repo.decideApproval(approvalId, decision, device = "Android Notification")
             } catch (_: Exception) {
             } finally {
                 context.sendBroadcast(Intent(ApprovalNotifier.ACTION_REFRESH_UI).setPackage(context.packageName))

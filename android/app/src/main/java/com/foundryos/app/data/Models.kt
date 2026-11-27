@@ -6,6 +6,7 @@ data class BotItem(
     val name: String,
     val role: String,
     val tagline: String,
+    val systemPrompt: String = "",
     val avatarShape: String = "circle",
     val avatarColor: String = "#111111",
     val model: String = "auto",
@@ -50,10 +51,12 @@ data class ArtifactItem(
 data class ApprovalItem(
     val id: String,
     val companyId: String,
+    val missionId: String? = null,
     val artifactId: String? = null,
     val title: String,
     val subtitle: String,
     val actionType: String,
+    val actionPayloadJson: String = "{}",
     val status: String, // PENDING, APPROVED, REJECTED, EXECUTED, FAILED
     val decidedByDevice: String? = null,
     val feedback: String = "",
@@ -103,6 +106,8 @@ data class ConnectorItem(
     val id: String,
     val name: String,
     val baseUrl: String,
+    val authHeader: String = "Authorization",
+    val authValue: String = "",
     val liveEnabled: Boolean,
 )
 
@@ -110,4 +115,5 @@ data class ProviderStatus(
     val name: String,
     val configured: Boolean,
     val model: String,
+    val baseUrl: String = "",
 )

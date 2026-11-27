@@ -1,23 +1,25 @@
-# PROJECT_STATE.md — CEO (Universal Autonomous Company OS)
+# PROJECT_STATE.md — CEO (100% On-Device Android OS)
 
 ## 1. Objectifs Principaux & Vision
-- Fournir une application Android native nommée **CEO** reproduisant l'interface épurée de la vidéo (rail latéral rétractable avec mascottes géométriques à badges, cartes Company Org, Deliverable QA, Release `Ship / Not yet`, et `Board meeting`).
-- Architecture **1 Sandbox = 1 Entreprise** avec **zéro métier hardcodé** : après toute description libre de l'utilisateur, le CEO conçoit et déploie dynamiquement l'équipe de bots et leurs outils atomiques.
-- Gouvernance stricte : vérification QA par un bot indépendant, approbation humaine idempotente avant toute action externe/release, et publication exclusive des APKs sur **GitHub Releases**.
+- Application Android native nommée **CEO** avec l'interface exacte de la vidéo (rail latéral rétractable avec mascottes géométriques à badges, cartes `Company Org`, `Deliverable QA`, `Release Ship / Not yet`, `Board meeting`, notifications actionnables).
+- **Zéro VPS requis** : tout le moteur multi-entreprises (`1 Sandbox = 1 Entreprise`, zéro métier hardcodé) tourne nativement sur Android (SQLite local, sandbox fichiers isolée, génération PDF native `PdfDocument` + ZIP, routeur Multi-LLM direct OkHttp, connecteurs REST API, QA indépendant et Approval Gate atomique).
+- Compilation exclusivement sur **GitHub Actions** et distribution exclusive de l'APK sur **GitHub Releases** (`Anisghd-lab/ceo-app`).
 
 ## 2. État d'Avancement Réel
-- [x] **Kernel Backend (`backend/`)** : FastAPI, SQLite WAL, `SandboxManager` (isolation + nettoyage env + E2B optionnel), `MemoryEngine` (Core blocks + FTS5), `MultiLLMRouter`, `ToolRegistry` (7 primitives atomiques), `GenericAgentRunner`, `CEOArchitect` (spawner dynamique), `ApprovalGate` (verrouillage optimiste idempotent).
-- [x] **Validation Backend (`pytest`)** : 5/5 tests passés (isolation inter-sandboxes, filtrage secrets hôtes, génération PDF + preview PNG + QA, stress test concurrence 10x idempotence, Kill Switch & REST API).
-- [x] **Application Android Native (`android/`)** : Kotlin + Jetpack Compose + Material 3, mascottes géométriques Canvas, rail rétractable, 4 cartes fidèles à la vidéo, dialogs Création libre / Livrables / Réglages Multi-LLM & Connecteurs, notifications actionnables `Ship` / `Not yet`.
-- [x] **Compilation APK & GitHub Release** : compilé exclusivement sur GitHub Actions (`run 45931352601`, `ubuntu-latest`) et publié sous le tag `v0.1.0` (`Anisghd-lab/ceo-app`).
+- [x] **Moteur 100% On-Device Android (`android/app/.../engine/`)** :
+  - `LocalDatabase.kt` : persistance SQLite WAL complète (entreprises, bots, messages, missions, artefacts, approbations atomiques, connecteurs, mémoire isolée).
+  - `OnDeviceSandbox.kt` : sandboxes isolées par entreprise, génération PDF multi-pages `PdfDocument`, archives `.zip`, vérification QA programmatique.
+  - `OnDeviceLLMClient.kt` : routeur Multi-LLM direct (`openrouter`, `gemini`, `xai`, `openai`, `anthropic`, `deepseek`, `groq`) avec vérification de clé (`Save & Verify LLM Key`).
+  - `AutonomousEngine.kt` : CEO dynamique zéro-hardcoding, boucle multi-étapes Strategist → Producer → Independent QA → Approval Gate → Live HTTP Connectors.
+- [x] **UI Android fidèle à la vidéo + FileProvider** (`MainApp.kt`, `Sheets.kt`, `VideoCards.kt`, `BotMascot.kt`, `ApprovalNotifier.kt`).
+- [x] **Backend Python optionnel (`backend/`)** : 5/5 tests `pytest` verts.
+- [ ] **Release APK `v0.2.0` (100% On-Device, sans VPS)** : en cours de build sur GitHub Actions.
 
 ## 3. Lacunes, Dettes Techniques & Points de Vigilance
-- Le mode `sandbox_exec` local utilise un sous-processus à environnement blanchi (pas de conteneur Docker sur PRoot ARM64) ; activer une clé **E2B** est recommandé pour exécuter du code tiers non fiable en production.
-- Les plateformes de vente sans API vendeur officielle (ou protégées par CAPTCHA) fonctionnent via génération de Listing Pack vérifié téléchargeable sur Android.
-- Pas encore de tests UI instrumentés Compose (`androidTest`) sur émulateur.
+- L'exécution de code arbitraire Python/bash n'est pas embarquée dans l'APK Android (sans Termux/PRoot), remplacée par le moteur natif de fichiers (`PdfDocument`, `ZipOutputStream`, fichiers texte/code/HTML/CSV) + appels API REST.
+- Pas encore de tests UI instrumentés Compose sur émulateur.
 
-## 4. Prochaines Étapes (Backlog Priorisé)
-1. Ajouter la prévisualisation native inline des pages PDF (PdfRenderer Android) dans la carte Deliverable.
-2. Ajouter la saisie vocale native Android sur le bouton compositeur.
-3. Ajouter un écran dédié d'édition fine du modèle LLM par bot directement depuis la carte `Company Org`.
-4. Ajouter la synchronisation push `ntfy` en arrière-plan via Foreground Service optionnel.
+## 4. Prochaines Étapes
+1. Ajouter la saisie vocale Android sur le bouton micro/compositeur.
+2. Ajouter un éditeur par bot dans `Company Org` pour choisir un modèle LLM différent par rôle.
+3. Ajouter un export complet du dossier sandbox en `.zip` partageable en 1 tap.

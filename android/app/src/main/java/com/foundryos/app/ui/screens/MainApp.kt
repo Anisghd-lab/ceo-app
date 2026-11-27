@@ -1,5 +1,10 @@
 package com.foundryos.app.ui.screens
 
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
+import android.os.Build
 import android.widget.Toast
 import androidx.compose.animation.animateContentSize
 import androidx.compose.foundation.background
@@ -69,6 +74,7 @@ import com.foundryos.app.data.CompanyProposalData
 import com.foundryos.app.data.ConnectorItem
 import com.foundryos.app.data.FoundryRepository
 import com.foundryos.app.data.ProviderStatus
+import com.foundryos.app.service.ApprovalNotifier
 import com.foundryos.app.ui.components.ArtifactDeliverableCard
 import com.foundryos.app.ui.components.BoardMeetingCard
 import com.foundryos.app.ui.components.BotMascot
@@ -78,11 +84,11 @@ import com.foundryos.app.ui.theme.FoundryColors
 import kotlinx.coroutines.launch
 
 /**
- * Exact Video UI adapted cleanly to Android:
- * - Left Rail (collapsible between compact badge-rail & expanded company/bots sidebar)
- * - Centered floating pill top bar: [CEO Mascot] CEO
- * - Pure white chat stream with black founder bubbles, gray bot replies, inline Company/Deliverable/Release/Board cards
- * - Floating pill bottom composer: [+] | Message CEO | [↑]
+ * Exact Video UI — 100% On-Device Android Engine (No VPS Required):
+ * - Collapsible left rail with geometric mascots & notification badges
+ * - Centered floating pill header: [Mascot] CEO
+ * - Pure white stream with black founder bubbles, gray bot bubbles, Company Org / Deliverable QA / Release Ship / Board Meeting cards
+ * - Bottom floating pill composer: [+] Message CEO [↑]
  */
 @Composable
 fun FoundryMainScreen(repo: FoundryRepository) {
@@ -107,39 +113,43 @@ fun FoundryMainScreen(repo: FoundryRepository) {
     var showArtifactsDialog by remember { mutableStateOf(false) }
     var showSettingsDialog by remember { mutableStateOf(false) }
 
-    var connectionStatus by remember { mutableStateOf("Checking kernel...") }
-    var isLive by remember { mutableStateOf(false) }
+    var hasAnyKey by remember { mutableStateOf(false) }
+    var engineSummary by remember { mutableStateOf("On-Device Engine") }
     var providers by remember { mutableStateOf<List<ProviderStatus>>(emptyList()) }
-    var killSwitch by remember { mutableStateOf(false) }
+    var killSwitch by remember { mutableStateOf(repo.killSwitch) }
+    var isTestingKey by remember { mutableStateOf(false) }
+    var keyTestResult by remember { mutableStateOf<String?>(null) }
 
     val listState = rememberLazyListState()
 
     fun refreshAll(preferredCompanyId: String? = activeCompanyId) {
-        scope.launch {
-            val (ok, msg) = repo.checkHealth()
-            isLive = ok
-            connectionStatus = msg
-            val list = repo.fetchCompanies()
-            companies = list
-            val chosen = preferredCompanyId?.takeIf { id -> list.any { it.id == id } } ?: list.firstOrNull()?.id
-            activeCompanyId = chosen
-            if (chosen != null) {
-                val (b, m, c) = repo.fetchCompanyDetail(chosen)
-                bots = b
-                messages = m
-                connectors = c
-                artifacts = repo.fetchArtifacts(chosen)
+        val (keyOk, summary) = repo.engineStatus()
+        hasAnyKey = keyOk
+        engineSummary = summary
+        providers = repo.getProviderStatuses()
+        killSwitch = repo.killSwitch
+
+        val list = repo.fetchCompanies()
+        companies = list
+        val chosen = preferredCompanyId?.takeIf { id -> list.any { it.id == id } } ?: list.firstOrNull()?.id
+        activeCompanyId = chosen
+        if (chosen != null) {
+            val (b, m, c) = repo.fetchCompanyDetail(chosen)
+            bots = b
+            messages = m
+            connectors = c
+            artifacts = repo.fetchArtifacts(chosen)
+            if (selectedBot == null || selectedBot?.companyId != chosen) {
                 selectedBot = b.firstOrNull { it.isCeo } ?: b.firstOrNull()
             } else {
-                bots = emptyList()
-                messages = emptyList()
-                connectors = emptyList()
-                artifacts = emptyList()
-                selectedBot = null
+                selectedBot = b.firstOrNull { it.id == selectedBot?.id } ?: b.firstOrNull()
             }
-            val (p, ks, _) = repo.fetchSettings()
-            providers = p
-            killSwitch = ks
+        } else {
+            bots = emptyList()
+            messages = emptyList()
+            connectors = emptyList()
+            artifacts = emptyList()
+            selectedBot = null
         }
     }
 
@@ -147,15 +157,21 @@ fun FoundryMainScreen(repo: FoundryRepository) {
         refreshAll()
     }
 
-    DisposableEffect(isLive) {
-        if (isLive) {
-            repo.connectWebSocket { _, cid ->
-                if (cid == null || cid == activeCompanyId) {
-                    refreshAll(activeCompanyId)
-                }
+    // Listen to instant UI refresh when user clicks "Ship" / "Not yet" in Android notification shade
+    DisposableEffect(context) {
+        val receiver = object : BroadcastReceiver() {
+            override fun onReceive(c: Context?, intent: Intent?) {
+                refreshAll(activeCompanyId)
             }
         }
-        onDispose { repo.closeWebSocket() }
+        val filter = IntentFilter(ApprovalNotifier.ACTION_REFRESH_UI)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            context.registerReceiver(receiver, filter, Context.RECEIVER_NOT_EXPORTED)
+        } else {
+            @Suppress("UnspecifiedRegisterReceiverFlag")
+            context.registerReceiver(receiver, filter)
+        }
+        onDispose { runCatching { context.unregisterReceiver(receiver) } }
     }
 
     LaunchedEffect(messages.size) {
@@ -175,17 +191,16 @@ fun FoundryMainScreen(repo: FoundryRepository) {
             .navigationBarsPadding()
             .imePadding(),
     ) {
-        // === LEFT RAIL (Exact match to video's compact icon rail <-> expanded company sidebar) ===
+        // === LEFT RAIL (Exact match to video) ===
         Column(
             modifier = Modifier
                 .fillMaxHeight()
                 .animateContentSize()
-                .width(if (sidebarExpanded) 216.dp else 64.dp)
+                .width(if (sidebarExpanded) 218.dp else 64.dp)
                 .background(FoundryColors.SidebarBg)
                 .padding(vertical = 12.dp, horizontal = if (sidebarExpanded) 12.dp else 8.dp),
             horizontalAlignment = if (sidebarExpanded) Alignment.Start else Alignment.CenterHorizontally,
         ) {
-            // Top macOS-inspired utility row: traffic dots + expand toggle + '+' new company button
             if (sidebarExpanded) {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -228,7 +243,6 @@ fun FoundryMainScreen(repo: FoundryRepository) {
 
                 Spacer(Modifier.height(14.dp))
 
-                // Big CEO rounded square tile (identical to video 00:00–00:04)
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -266,7 +280,6 @@ fun FoundryMainScreen(repo: FoundryRepository) {
 
                 Spacer(Modifier.height(10.dp))
 
-                // Live bots list with status subtitles
                 LazyColumn(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     items(bots.filter { !it.isCeo }) { bot ->
                         Row(
@@ -275,8 +288,10 @@ fun FoundryMainScreen(repo: FoundryRepository) {
                                 .clip(RoundedCornerShape(12.dp))
                                 .background(if (selectedBot?.id == bot.id) Color.White else Color.Transparent)
                                 .clickable {
+                                    repo.clearBotUnread(bot.id)
                                     selectedBot = bot
                                     sidebarExpanded = false
+                                    refreshAll(activeCompanyId)
                                 }
                                 .padding(horizontal = 6.dp, vertical = 6.dp),
                             verticalAlignment = Alignment.CenterVertically,
@@ -319,6 +334,7 @@ fun FoundryMainScreen(repo: FoundryRepository) {
                                     .background(if (active) Color.White else Color.Transparent)
                                     .border(if (active) 1.dp else 0.dp, if (active) FoundryColors.Border else Color.Transparent, RoundedCornerShape(10.dp))
                                     .clickable {
+                                        selectedBot = null
                                         refreshAll(comp.id)
                                         sidebarExpanded = false
                                     }
@@ -343,7 +359,6 @@ fun FoundryMainScreen(repo: FoundryRepository) {
                     }
                 }
             } else {
-                // Compact icon + notification badge rail (identical to video 00:05–00:22!)
                 Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                     Box(Modifier.size(7.dp).background(Color(0xFFFF5F57), CircleShape))
                     Box(Modifier.size(7.dp).background(Color(0xFFFEBC2E), CircleShape))
@@ -373,7 +388,11 @@ fun FoundryMainScreen(repo: FoundryRepository) {
                         Box(
                             modifier = Modifier
                                 .clip(CircleShape)
-                                .clickable { selectedBot = bot }
+                                .clickable {
+                                    repo.clearBotUnread(bot.id)
+                                    selectedBot = bot
+                                    refreshAll(activeCompanyId)
+                                }
                                 .padding(2.dp),
                         ) {
                             BotMascot(
@@ -405,9 +424,8 @@ fun FoundryMainScreen(repo: FoundryRepository) {
 
         VerticalDivider(color = FoundryColors.Border, thickness = 0.8.dp)
 
-        // === RIGHT MAIN COCKPIT (Exact video layout) ===
+        // === RIGHT MAIN COCKPIT ===
         Column(modifier = Modifier.weight(1f).fillMaxHeight()) {
-            // Top bar with centered floating pill: [Mascot] CEO
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -440,10 +458,8 @@ fun FoundryMainScreen(repo: FoundryRepository) {
                     if (activeCompany != null) {
                         IconButton(
                             onClick = {
-                                scope.launch {
-                                    repo.requestBoardMeeting(activeCompany.id)
-                                    refreshAll(activeCompany.id)
-                                }
+                                repo.requestBoardMeeting(activeCompany.id)
+                                refreshAll(activeCompany.id)
                             },
                             modifier = Modifier.size(34.dp),
                         ) {
@@ -460,14 +476,17 @@ fun FoundryMainScreen(repo: FoundryRepository) {
                         onClick = { showSettingsDialog = true },
                         modifier = Modifier.size(34.dp),
                     ) {
-                        Icon(Icons.Rounded.Settings, contentDescription = "Settings", tint = FoundryColors.InkSecondary, modifier = Modifier.size(19.dp))
+                        Icon(
+                            Icons.Rounded.Settings,
+                            contentDescription = "Settings",
+                            tint = if (hasAnyKey) FoundryColors.InkSecondary else FoundryColors.AmberInk,
+                            modifier = Modifier.size(19.dp),
+                        )
                     }
                 }
             }
 
-            // Chat & Action Stream
             if (activeCompany == null) {
-                // Clean Video-Style Empty State ("Found your first company")
                 Column(
                     modifier = Modifier
                         .weight(1f)
@@ -481,22 +500,35 @@ fun FoundryMainScreen(repo: FoundryRepository) {
                     Text("CEO", style = MaterialTheme.typography.titleLarge)
                     Spacer(Modifier.height(6.dp))
                     Text(
-                        text = "Describe any company below. Your CEO will dynamically hire the exact bots needed inside an isolated sandbox — and ask you before anything ships.",
+                        text = "100% on-device. Describe any company below — your CEO dynamically hires the bots in an isolated sandbox and asks you before anything ships.",
                         style = MaterialTheme.typography.bodyMedium,
                         color = FoundryColors.InkSecondary,
                     )
                     Spacer(Modifier.height(18.dp))
-                    Box(
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(999.dp))
-                            .background(FoundryColors.InkPrimary)
-                            .clickable {
-                                proposal = null
-                                showCreateDialog = true
+                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(999.dp))
+                                .background(FoundryColors.InkPrimary)
+                                .clickable {
+                                    proposal = null
+                                    showCreateDialog = true
+                                }
+                                .padding(horizontal = 18.dp, vertical = 12.dp),
+                        ) {
+                            Text("Create a company", color = Color.White, fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+                        }
+                        if (!hasAnyKey) {
+                            Box(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(999.dp))
+                                    .background(FoundryColors.SoftSurface)
+                                    .clickable { showSettingsDialog = true }
+                                    .padding(horizontal = 16.dp, vertical = 12.dp),
+                            ) {
+                                Text("Add LLM Key", color = FoundryColors.InkPrimary, fontWeight = FontWeight.Medium, fontSize = 14.sp)
                             }
-                            .padding(horizontal = 20.dp, vertical = 12.dp),
-                    ) {
-                        Text("Create a company", color = Color.White, fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+                        }
                     }
                 }
             } else {
@@ -509,7 +541,7 @@ fun FoundryMainScreen(repo: FoundryRepository) {
                     item {
                         Box(modifier = Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
                             Text(
-                                text = "Today · ${activeCompany.name} · sandbox",
+                                text = "Today · ${activeCompany.name} · on-device sandbox",
                                 style = MaterialTheme.typography.labelSmall,
                                 color = FoundryColors.InkMuted,
                             )
@@ -519,6 +551,9 @@ fun FoundryMainScreen(repo: FoundryRepository) {
                     items(messages, key = { it.id }) { msg ->
                         ChatMessageRow(
                             msg = msg,
+                            onBotClick = { bot ->
+                                selectedBot = bots.firstOrNull { it.id == bot.id } ?: bot
+                            },
                             onApprove = { aprId ->
                                 scope.launch {
                                     repo.decideApproval(aprId, "APPROVED")
@@ -532,13 +567,9 @@ fun FoundryMainScreen(repo: FoundryRepository) {
                                 }
                             },
                             onDownloadArtifact = { art ->
-                                scope.launch {
-                                    val f = repo.downloadArtifact(art)
-                                    Toast.makeText(
-                                        context,
-                                        if (f != null) "Saved: ${f.name}" else "Connect live kernel in Settings to download binary",
-                                        Toast.LENGTH_SHORT,
-                                    ).show()
+                                val opened = repo.openOrShareArtifact(art)
+                                if (!opened) {
+                                    Toast.makeText(context, "File not found in sandbox", Toast.LENGTH_SHORT).show()
                                 }
                             },
                         )
@@ -560,7 +591,7 @@ fun FoundryMainScreen(repo: FoundryRepository) {
                 }
             }
 
-            // Bottom Floating Pill Composer (Exact match to video's [+] Message CEO [●])
+            // Bottom Floating Pill Composer
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -627,9 +658,17 @@ fun FoundryMainScreen(repo: FoundryRepository) {
                                         val created = repo.deployCompany(text, prop)
                                         refreshAll(created.id)
                                     } else {
-                                        busyLabel = "${headerBot?.name ?: "CEO"} is coordinating sandbox..."
+                                        busyLabel = "${headerBot?.name ?: "CEO"} is working in sandbox..."
                                         val targetId = if (headerBot?.isCeo == true) null else headerBot?.id
-                                        repo.sendFounderMessage(activeCompany.id, text, targetBotId = targetId)
+                                        repo.sendFounderMessage(
+                                            companyId = activeCompany.id,
+                                            text = text,
+                                            targetBotId = targetId,
+                                            onStatusUpdate = { status ->
+                                                busyLabel = status
+                                                refreshAll(activeCompany.id)
+                                            },
+                                        )
                                         refreshAll(activeCompany.id)
                                     }
                                     isBusy = false
@@ -649,7 +688,6 @@ fun FoundryMainScreen(repo: FoundryRepository) {
         }
     }
 
-    // Dialogs
     if (showCreateDialog) {
         CreateCompanyDialog(
             isLoading = isBusy,
@@ -681,14 +719,8 @@ fun FoundryMainScreen(repo: FoundryRepository) {
             companyName = activeCompany.name,
             artifacts = artifacts,
             onDownload = { art ->
-                scope.launch {
-                    val f = repo.downloadArtifact(art)
-                    Toast.makeText(
-                        context,
-                        if (f != null) "Downloaded to ${f.name}" else "Connect live kernel in Settings to download",
-                        Toast.LENGTH_SHORT,
-                    ).show()
-                }
+                val ok = repo.openOrShareArtifact(art)
+                if (!ok) Toast.makeText(context, "File not found in sandbox", Toast.LENGTH_SHORT).show()
             },
             onDismiss = { showArtifactsDialog = false },
         )
@@ -696,40 +728,38 @@ fun FoundryMainScreen(repo: FoundryRepository) {
 
     if (showSettingsDialog) {
         SettingsDialog(
-            serverUrl = repo.serverUrl,
-            pairingToken = repo.pairingToken,
-            connectionStatus = connectionStatus,
-            isLive = isLive,
+            engineSummary = engineSummary,
+            hasAnyKey = hasAnyKey,
             providers = providers,
             connectors = connectors,
             killSwitch = killSwitch,
-            onSaveConnection = { url, tok ->
-                repo.serverUrl = url
-                repo.pairingToken = tok
-                refreshAll()
-            },
-            onSaveProvider = { prov, key, mod ->
+            isTestingKey = isTestingKey,
+            testResult = keyTestResult,
+            onSaveAndTestProvider = { prov, key, mod ->
                 scope.launch {
-                    val ok = repo.saveProviderKey(prov, key, mod)
-                    Toast.makeText(context, if (ok) "Saved $prov key" else "Connect live kernel first", Toast.LENGTH_SHORT).show()
-                    refreshAll()
+                    isTestingKey = true
+                    keyTestResult = null
+                    repo.saveProviderKey(prov, key, mod)
+                    val (ok, msg) = repo.testProviderKey(prov)
+                    keyTestResult = if (ok) msg else "Saved locally, check failed: $msg"
+                    isTestingKey = false
+                    refreshAll(activeCompanyId)
                 }
             },
             onAddConnector = { name, url, auth, live ->
                 val cid = activeCompanyId ?: return@SettingsDialog
-                scope.launch {
-                    repo.addConnector(cid, name, url, auth, live)
-                    Toast.makeText(context, "Connector '$name' attached", Toast.LENGTH_SHORT).show()
-                    refreshAll(cid)
-                }
+                repo.addConnector(cid, name, url, auth, live)
+                Toast.makeText(context, "Connector '$name' attached", Toast.LENGTH_SHORT).show()
+                refreshAll(cid)
             },
             onToggleKillSwitch = { active ->
-                scope.launch {
-                    repo.toggleKillSwitch(active)
-                    killSwitch = active
-                }
+                repo.killSwitch = active
+                killSwitch = active
             },
-            onDismiss = { showSettingsDialog = false },
+            onDismiss = {
+                keyTestResult = null
+                showSettingsDialog = false
+            },
         )
     }
 }
@@ -737,6 +767,7 @@ fun FoundryMainScreen(repo: FoundryRepository) {
 @Composable
 private fun ChatMessageRow(
     msg: ChatMessageItem,
+    onBotClick: (BotItem) -> Unit,
     onApprove: (String) -> Unit,
     onReject: (String) -> Unit,
     onDownloadArtifact: (ArtifactItem) -> Unit,
@@ -776,6 +807,7 @@ private fun ChatMessageRow(
                 subtitle = msg.orgSubtitle,
                 bots = msg.orgBots,
                 connectors = msg.orgConnectors,
+                onBotClick = onBotClick,
             )
         }
         msg.cardType == "artifact" && msg.artifact != null -> {

@@ -244,6 +244,7 @@ class AutonomousEngine(
     private val atomicTools = listOf(
         "sandbox_files",
         "create_pdf",
+        "create_svg_graphic",
         "create_zip",
         "web_fetch",
         "company_memory",
@@ -259,7 +260,7 @@ class AutonomousEngine(
             Nothing is hardcoded by industry. The human described a new company to launch:
             "$description"
 
-            Design the exact team of specialist bots (3 to 6 bots, NOT counting the CEO which is added automatically).
+            Design the exact team of specialist bots (3 to 8 bots, NOT counting the CEO which is added automatically), splitting distinct functions cleanly (e.g. Trend Hunter, Data/Content Researcher, Visuals & Charts Designer, Core Builder, Independent Quality Auditor, Marketing/Video Studio, Social & 24/7 Customer Care/Sales Operator when relevant to the objective).
             ${pluginExecutor?.activeToolsSummaryForPrompt().orEmpty()}
             Rules:
             - Output strictly ONE JSON object.
@@ -330,7 +331,7 @@ class AutonomousEngine(
 
         var hasQa = false
         val rawBots = raw.optJSONArray("bots") ?: JSONArray()
-        for (i in 0 until minOf(rawBots.length(), 7)) {
+        for (i in 0 until minOf(rawBots.length(), 9)) {
             val b = rawBots.optJSONObject(i) ?: continue
             val bName = b.optString("name").trim()
             if (bName.isBlank() || bName.equals("ceo", ignoreCase = true)) continue
@@ -958,9 +959,39 @@ class AutonomousEngine(
 
         val ceoBot = alignedBots.firstOrNull { it.isCeo } ?: alignedBots.first()
         val qaBot = alignedBots.firstOrNull { it.isQa } ?: alignedBots.last()
-        val strategistBot = alignedBots.firstOrNull { !it.isCeo && !it.isQa && (it.allowedTools.contains("web_fetch") || it.allowedTools.contains("browser_search") || it.name.contains("Strateg", true)) }
-        val producerBot = alignedBots.firstOrNull { !it.isCeo && !it.isQa && (it.allowedTools.contains("create_pdf") || it.id != strategistBot?.id) }
-            ?: alignedBots.firstOrNull { !it.isCeo && !it.isQa } ?: ceoBot
+        val memoryBot = alignedBots.firstOrNull {
+            !it.isCeo && !it.isQa && (it.name.equals("Memory", true) || it.allowedTools == listOf("company_memory"))
+        }
+
+        fun isResearchRole(b: BotItem): Boolean {
+            val sig = "${b.name} ${b.role}".lowercase()
+            return listOf("trend", "tendance", "research", "recherche", "strateg", "data", "analyst", "veil").any { it in sig }
+        }
+        fun isVisualRole(b: BotItem): Boolean {
+            val sig = "${b.name} ${b.role}".lowercase()
+            return listOf("graph", "visual", "chart", "design", "illustr").any { it in sig } ||
+                b.allowedTools.contains("create_svg_graphic")
+        }
+        fun isMarketingOrSocialRole(b: BotItem): Boolean {
+            val sig = "${b.name} ${b.role}".lowercase()
+            return listOf("market", "video", "promo", "social", "insta", "tiktok", "sales", "vent", "support", "client", "comm", "publish", "growth").any { it in sig }
+        }
+
+        val candidates = alignedBots.filter { !it.isCeo && !it.isQa && it.id != memoryBot?.id }
+        val researchBots = candidates.filter { isResearchRole(it) && !isVisualRole(it) && !isMarketingOrSocialRole(it) }
+            .ifEmpty { candidates.filter { it.allowedTools.contains("web_fetch") || it.allowedTools.contains("browser_search") }.take(1) }
+        val researchIds = researchBots.map { it.id }.toSet()
+
+        val producerBot = candidates.firstOrNull {
+            it.id !in researchIds && !isMarketingOrSocialRole(it) && !isVisualRole(it) &&
+                (it.allowedTools.contains("create_pdf") || !isResearchRole(it))
+        } ?: candidates.firstOrNull { it.id !in researchIds && !isMarketingOrSocialRole(it) }
+            ?: candidates.firstOrNull { it.id !in researchIds }
+            ?: ceoBot
+
+        val visualDesignBots = candidates.filter { it.id !in researchIds && it.id != producerBot.id && isVisualRole(it) && !isMarketingOrSocialRole(it) }
+        val stage1And2Ids = researchIds + visualDesignBots.map { it.id } + producerBot.id
+        val postQaSpecialists = candidates.filter { it.id !in stage1And2Ids }
 
         val missionId = "msn_${UUID.randomUUID().toString().take(8)}"
         db.insertMission(missionId, comp.id, title, goal)
@@ -969,42 +1000,48 @@ class AutonomousEngine(
             recordBotActivity(sp, "idle", task = "Mandate assigned: ${sp.role}", reasoning = sp.systemPrompt.take(260))
         }
 
-        // Step 1: Strategist / Scoping (Agentic with connected Plugins + LLM)
-        var scopedSpec = goal
-        if (strategistBot != null && hasActiveEngine() && !runCancelled) {
-            onStatusUpdate("${strategistBot.name} researching with plugins...")
-            recordBotActivity(strategistBot, "working", task = "Researching & Scoping: $title", reasoning = "Planning research with plugins...")
-            db.updateBotStatus(strategistBot.id, "working", "Research & Spec...")
-            val specReply = runDirectBotChat(
+        // Stage 1: Research, Trends & Data Discovery Bots run sequentially feeding cumulative findings forward
+        val researchDossier = StringBuilder(goal)
+        for (rBot in researchBots) {
+            if (runCancelled || killSwitch) return
+            if (!hasActiveEngine()) break
+            onStatusUpdate("${rBot.name} (${rBot.role}) researching...")
+            recordBotActivity(rBot, "working", task = "Researching: $title", reasoning = "Executing ${rBot.role}...")
+            db.updateBotStatus(rBot.id, "working", "Research & Data...")
+            val reply = runDirectBotChat(
                 comp = comp,
-                bot = strategistBot,
-                userText = "Research this mission for '${comp.name}' (Objective: ${comp.description}) using relevant plugins (browser_search, browser_read_url, notion_search, github_list_repos, scite_search, gdrive_search, etc.) if useful, then produce a detailed actionable specification and quality checklist.\nMission: $goal",
+                bot = rBot,
+                userText = "You are ${rBot.name} (${rBot.role}) at '${comp.name}' (Objective: ${comp.description}).\n" +
+                    "Use your connected plugins/tools (browser_search, browser_read_url, scite_search, notion_search, gdrive_search, tinyfish_extract) to complete your specific research step for '$title' and report structured findings.\n\nCurrent Brief & Prior Findings:\n${researchDossier.toString().take(2400)}",
                 onStatusUpdate = onStatusUpdate,
             )
-            if (!specReply.startsWith("⚠️") && !runCancelled) {
-                scopedSpec = specReply
-                sandbox.writeTextFile(comp.id, "workspace/${missionId}_spec.md", scopedSpec)
-                recordBotActivity(strategistBot, "idle", task = "Spec complete", reasoning = scopedSpec.take(300))
-                db.updateBotStatus(strategistBot.id, "idle", "Spec done", incrementUnread = true)
-                db.rememberNote("mem_${UUID.randomUUID().toString().take(8)}", comp.id, strategistBot.name, "report_to_ceo", scopedSpec.take(600))
+            if (!reply.startsWith("⚠️") && !runCancelled) {
+                researchDossier.append("\n\n### Findings from ${rBot.name} (${rBot.role}):\n").append(reply)
+                recordBotActivity(rBot, "idle", task = "Research complete", reasoning = reply.take(300))
+                db.updateBotStatus(rBot.id, "idle", "Research done", incrementUnread = true)
+                db.rememberNote("mem_${UUID.randomUUID().toString().take(8)}", comp.id, rBot.name, "report_to_ceo", reply.take(600))
                 db.insertMessage(
                     ChatMessageItem(
                         "msg_${UUID.randomUUID().toString().take(10)}",
                         comp.id,
                         "bot",
-                        botId = strategistBot.id,
-                        botName = strategistBot.name,
-                        content = "📋 [${strategistBot.name} → CEO] Spec & recherche prêtes : ${scopedSpec.lineSequence().firstOrNull { it.isNotBlank() }?.take(140) ?: "Spec validée"}",
+                        botId = rBot.id,
+                        botName = rBot.name,
+                        content = "📋 [${rBot.name} → CEO] ${reply.lineSequence().firstOrNull { it.isNotBlank() }?.take(180) ?: "Recherche terminée."}",
                     )
                 )
             } else {
-                recordBotActivity(strategistBot, "idle", task = "Ready")
-                db.updateBotStatus(strategistBot.id, "idle", "Ready")
+                recordBotActivity(rBot, "idle", task = "Ready")
+                db.updateBotStatus(rBot.id, "idle", "Ready")
             }
+        }
+        val scopedSpec = researchDossier.toString()
+        if (researchBots.isNotEmpty() && !runCancelled) {
+            sandbox.writeTextFile(comp.id, "workspace/${missionId}_spec.md", scopedSpec)
         }
         if (runCancelled || killSwitch) return
 
-        // Step 2: Producer Bot runs Multi-Step Agentic Loop inside isolated Android sandbox + Plugins
+        // Stage 2a: Primary Producer Bot builds core deliverable(s)
         onStatusUpdate("${producerBot.name} is building in sandbox...")
         recordBotActivity(producerBot, "working", task = "Building deliverables: $title")
         db.updateBotStatus(producerBot.id, "working", "Building deliverable...")
@@ -1024,51 +1061,41 @@ class AutonomousEngine(
         )
         if (runCancelled || killSwitch) return
 
-        // Step 2b: Engage any additional domain specialists (Designer, Publisher, Growth, Ops...) autonomously
-        val memoryBot = alignedBots.firstOrNull { !it.isCeo && !it.isQa && (it.name.equals("Memory", true) || it.allowedTools == listOf("company_memory")) }
-        val otherSpecialists = alignedBots.filter { b ->
-            !b.isCeo && !b.isQa &&
-                b.id != strategistBot?.id &&
-                b.id != producerBot.id &&
-                b.id != memoryBot?.id
-        }
-        for (specBot in otherSpecialists) {
+        // Stage 2b: Visual & Graphic Design Bots generate vector charts, diagrams & visual assets before QA
+        for (vBot in visualDesignBots) {
             if (runCancelled || killSwitch) return
             if (!hasActiveEngine()) break
-            onStatusUpdate("${specBot.name} (${specBot.role}) collaborating...")
-            recordBotActivity(specBot, "working", task = "Executing ${specBot.role} for $title")
-            db.updateBotStatus(specBot.id, "working", "Using tools & plugins...")
-            val builtList = createdArtifacts.joinToString(", ") { "${it.filename} (${it.relPath})" }.ifBlank { "none yet" }
-            val specReply = runDirectBotChat(
+            onStatusUpdate("${vBot.name} designing visuals & charts...")
+            recordBotActivity(vBot, "working", task = "Creating graphics for $title")
+            db.updateBotStatus(vBot.id, "working", "Designing visuals...")
+            val vReply = runDirectBotChat(
                 comp = comp,
-                bot = specBot,
-                userText = "You are collaborating on mission '$title' (Goal: $goal).\n" +
-                    "Current deliverables in sandbox output/: $builtList.\n" +
-                    "Using ONLY your real role (${specBot.role}), your sandbox/plugin tools, and facts from the spec, perform your concrete specialist step (for example build a supporting companion file/HTML/MD, verify distribution readiness, or prepare plugin actions) and report concisely to CEO.\n\nSpec summary:\n${scopedSpec.take(1500)}",
+                bot = vBot,
+                userText = "You are ${vBot.name} (${vBot.role}). Create clean vector charts/diagrams/visuals in output/ using `create_svg_graphic` or `product_design_prototype` (or connected Canva/Figma/Kittl plugins) aligned with '${comp.name}' and '$title'.\nResearch & Deliverable context:\n${scopedSpec.take(1600)}",
                 onStatusUpdate = onStatusUpdate,
             )
-            if (!runCancelled && !specReply.startsWith("⚠️")) {
-                recordBotActivity(specBot, "idle", task = "Reported to CEO", reasoning = specReply.take(280))
-                db.updateBotStatus(specBot.id, "idle", "Done · Reported", incrementUnread = true)
-                db.rememberNote("mem_${UUID.randomUUID().toString().take(8)}", comp.id, specBot.name, "report_to_ceo", specReply.take(600))
+            if (!runCancelled && !vReply.startsWith("⚠️")) {
+                recordBotActivity(vBot, "idle", task = "Visuals ready", reasoning = vReply.take(280))
+                db.updateBotStatus(vBot.id, "idle", "Visuals done", incrementUnread = true)
+                db.rememberNote("mem_${UUID.randomUUID().toString().take(8)}", comp.id, vBot.name, "report_to_ceo", vReply.take(500))
                 db.insertMessage(
                     ChatMessageItem(
                         "msg_${UUID.randomUUID().toString().take(10)}",
                         comp.id,
                         "bot",
-                        botId = specBot.id,
-                        botName = specBot.name,
-                        content = "🤖 [${specBot.name} → CEO] ${specReply.lineSequence().firstOrNull { it.isNotBlank() }?.take(220) ?: "Tâche exécutée."}",
+                        botId = vBot.id,
+                        botName = vBot.name,
+                        content = "🎨 [${vBot.name} → CEO] ${vReply.lineSequence().firstOrNull { it.isNotBlank() }?.take(200) ?: "Visuels créés."}",
                     )
                 )
             } else {
-                recordBotActivity(specBot, "idle", task = "Standing by")
-                db.updateBotStatus(specBot.id, "idle", "Ready")
+                recordBotActivity(vBot, "idle", task = "Ready")
+                db.updateBotStatus(vBot.id, "idle", "Ready")
             }
         }
         if (runCancelled || killSwitch) return
 
-        // Step 3: Independent Quality Auditor checks every artifact against company objective
+        // Stage 3: Independent Quality Auditor checks deliverables (+ Producer revision if score < 70)
         onStatusUpdate("${qaBot.name} is verifying quality...")
         recordBotActivity(qaBot, "working", task = "Auditing ${createdArtifacts.firstOrNull()?.filename ?: title}", tool = "qa_verify", plugin = "Quality Auditor")
         db.updateBotStatus(qaBot.id, "working", "Auditing in sandbox...")
@@ -1076,7 +1103,6 @@ class AutonomousEngine(
         var primaryArt = createdArtifacts.firstOrNull()
         var qaTuple = runIndependentQa(comp, qaBot, primaryArt, goal)
 
-        // Self-correction cycle: if QA fails or scores < 70, Producer automatically revises once!
         if ((!qaTuple.first || qaTuple.second < 70) && hasActiveEngine() && !killSwitch && !runCancelled) {
             onStatusUpdate("${producerBot.name} revising after QA (${qaTuple.second}/100)...")
             recordBotActivity(producerBot, "working", task = "Revising after QA (${qaTuple.second}/100)")
@@ -1112,6 +1138,46 @@ class AutonomousEngine(
                 content = "🛡️ [${qaBot.name} → CEO] Audit QA : $qaScore/100 — $qaReport",
             )
         )
+        if (runCancelled || killSwitch) return
+
+        // Stage 4: Marketing, Video Studio, Instagram/TikTok Social & 24/7 Customer Care / Sales Bots execute after QA
+        for (postBot in postQaSpecialists) {
+            if (runCancelled || killSwitch) return
+            if (!hasActiveEngine()) break
+            onStatusUpdate("${postBot.name} (${postBot.role}) running growth/launch...")
+            recordBotActivity(postBot, "working", task = "Executing ${postBot.role} for $title")
+            db.updateBotStatus(postBot.id, "working", "Running ${postBot.role}...")
+            val builtList = sandbox.listOutputFiles(comp.id).joinToString(", ") { it.name }.ifBlank { "none" }
+            val pReply = runDirectBotChat(
+                comp = comp,
+                bot = postBot,
+                userText = "QA passed ($qaScore/100) for mission '$title' (Goal: $goal).\n" +
+                    "Verified sandbox output/ files: $builtList.\n" +
+                    "Using your exact role (${postBot.role}) and real tools/plugins (`product_design_prototype` for interactive promo video reels/ads/sales pages, `create_svg_graphic`, `instagram_list_comments`, `instagram_reply_comment`, `instagram_publish_post`, `tiktok_list_videos`, `tiktok_publish_video`, `gmail_*`, `slack_*`, `http_api_call`), execute your marketing/distribution/24-7 customer-care or sales step cleanly. External writes will automatically ask Founder approval via Ship. Report concisely to CEO.",
+                onStatusUpdate = onStatusUpdate,
+            )
+            if (!runCancelled && !pReply.startsWith("⚠️")) {
+                recordBotActivity(postBot, "idle", task = "Reported to CEO", reasoning = pReply.take(280))
+                db.updateBotStatus(postBot.id, "idle", "Done · Reported", incrementUnread = true)
+                db.rememberNote("mem_${UUID.randomUUID().toString().take(8)}", comp.id, postBot.name, "report_to_ceo", pReply.take(600))
+                db.insertMessage(
+                    ChatMessageItem(
+                        "msg_${UUID.randomUUID().toString().take(10)}",
+                        comp.id,
+                        "bot",
+                        botId = postBot.id,
+                        botName = postBot.name,
+                        content = "🤖 [${postBot.name} → CEO] ${pReply.lineSequence().firstOrNull { it.isNotBlank() }?.take(220) ?: "Tâche exécutée."}",
+                    )
+                )
+            } else {
+                recordBotActivity(postBot, "idle", task = "Standing by")
+                db.updateBotStatus(postBot.id, "idle", "Ready")
+            }
+        }
+        if (runCancelled || killSwitch) return
+
+        // Stage 5: Memory Sync + Artifact Cards + Human Approval Gate
         memoryBot?.let { mBot ->
             val memSummary = "Mission '$title' built by ${producerBot.name}; QA by ${qaBot.name}: $qaScore/100 ($qaReport)"
             recordBotActivity(mBot, "idle", task = "Memory synced ($qaScore/100)", tool = "company_memory", plugin = "Company Memory", reasoning = memSummary)
@@ -1522,6 +1588,17 @@ class AutonomousEngine(
                 val art = registerArtifact(comp.id, bot.name, zName, file, "Packaged ZIP (${paths.size} files)")
                 JSONObject().put("ok", true).put("rel_path", art.relPath).put("bytes", art.sizeBytes).toString() to art
             }
+            "create_svg_graphic" -> {
+                val fnRaw = args.optString("filename").ifBlank { "${slugify(comp.name)}_graphic.svg" }
+                val cleanFn = fnRaw.replace(Regex("[^a-zA-Z0-9._-]"), "_").let { if (it.endsWith(".svg", true)) it else "$it.svg" }
+                val title = args.optString("title").ifBlank { "Visual Graphic" }
+                val rawSvg = args.optString("svg").trim()
+                val svgContent = if (rawSvg.contains("<svg", ignoreCase = true)) rawSvg
+                else """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 480" width="800" height="480"><rect width="800" height="480" rx="24" fill="#F8FAFC"/><text x="48" y="72" font-family="system-ui,sans-serif" font-size="28" font-weight="700" fill="#0F172A">$title</text><rect x="48" y="120" width="704" height="296" rx="16" fill="#FFFFFF" stroke="#E2E8F0"/><text x="72" y="180" font-family="system-ui,sans-serif" font-size="16" fill="#334155">${args.optString("summary", comp.description).take(120)}</text></svg>"""
+                val file = sandbox.writeTextFile(comp.id, "output/$cleanFn", svgContent)
+                val art = registerArtifact(comp.id, bot.name, title, file, "Vector SVG graphic/chart")
+                JSONObject().put("ok", true).put("rel_path", art.relPath).put("bytes", art.sizeBytes).toString() to art
+            }
             "assign_bot_prompt" -> {
                 val targetName = args.optString("bot_name").trim()
                 val newRole = args.optString("role").trim()
@@ -1567,6 +1644,8 @@ class AutonomousEngine(
         val mime = MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext) ?: when (ext) {
             "pdf" -> "application/pdf"
             "zip" -> "application/zip"
+            "svg" -> "image/svg+xml"
+            "html" -> "text/html"
             "md" -> "text/markdown"
             else -> "text/plain"
         }

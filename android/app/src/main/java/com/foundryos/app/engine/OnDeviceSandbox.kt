@@ -102,94 +102,97 @@ class OnDeviceSandbox(private val context: Context) {
         val margin = 48
         val contentWidth = pageWidth - margin * 2
 
-        val pdf = PdfDocument()
-        var pageNum = 1
-        var page: PdfDocument.Page? = pdf.startPage(PdfDocument.PageInfo.Builder(pageWidth, pageHeight, pageNum).create())
-        if (page == null) {
-            runCatching { pdf.close() }
-            return writeBasicPdfFallback(outFile, title, subtitle, sections)
-        }
-        var canvas = page.canvas
-
-        val titlePaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.parseColor("#111111")
-            textSize = 22f
-            typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.BOLD)
-        }
-        val subPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.parseColor("#6B7280")
-            textSize = 11.5f
-            typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.NORMAL)
-        }
-        val h2Paint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.parseColor("#111111")
-            textSize = 14f
-            typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.BOLD)
-        }
-        val bodyPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.parseColor("#1F2937")
-            textSize = 11f
-            typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.NORMAL)
-        }
-        val dividerPaint = Paint().apply {
-            color = Color.parseColor("#E5E7EB")
-            strokeWidth = 1.2f
-        }
-
-        fun nextPage() {
-            pdf.finishPage(page)
-            pageNum += 1
-            page = pdf.startPage(PdfDocument.PageInfo.Builder(pageWidth, pageHeight, pageNum).create())
-            canvas = page.canvas
-        }
-
-        fun drawTextLayout(text: String, paint: TextPaint, x: Float, startY: Float): Float {
-            val layout = StaticLayout.Builder.obtain(text, 0, text.length, paint, contentWidth)
-                .setAlignment(Layout.Alignment.ALIGN_NORMAL)
-                .setLineSpacing(4f, 1.15f)
-                .build()
-            var y = startY
-            if (y + layout.height > pageHeight - margin) {
-                nextPage()
-                y = margin.toFloat()
+        val renderedNative = runCatching {
+            val pdf = PdfDocument()
+            var pageNum = 1
+            var page: PdfDocument.Page? = pdf.startPage(PdfDocument.PageInfo.Builder(pageWidth, pageHeight, pageNum).create())
+            if (page == null) {
+                runCatching { pdf.close() }
+                return writeBasicPdfFallback(outFile, title, subtitle, sections)
             }
-            canvas.save()
-            canvas.translate(x, y)
-            layout.draw(canvas)
-            canvas.restore()
-            return y + layout.height
-        }
+            var canvas = page.canvas
 
-        var cursorY = margin.toFloat() + 10f
-        cursorY = drawTextLayout(title, titlePaint, margin.toFloat(), cursorY)
-        cursorY += 6f
-        cursorY = drawTextLayout(subtitle, subPaint, margin.toFloat(), cursorY)
-        cursorY += 14f
-        canvas.drawLine(margin.toFloat(), cursorY, (pageWidth - margin).toFloat(), cursorY, dividerPaint)
-        cursorY += 18f
-
-        for ((heading, body) in sections) {
-            if (cursorY > pageHeight - margin - 80) {
-                nextPage()
-                cursorY = margin.toFloat()
+            val titlePaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = Color.parseColor("#111111")
+                textSize = 22f
+                typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.BOLD)
             }
-            cursorY = drawTextLayout(heading, h2Paint, margin.toFloat(), cursorY)
+            val subPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = Color.parseColor("#6B7280")
+                textSize = 11.5f
+                typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.NORMAL)
+            }
+            val h2Paint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = Color.parseColor("#111111")
+                textSize = 14f
+                typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.BOLD)
+            }
+            val bodyPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = Color.parseColor("#1F2937")
+                textSize = 11f
+                typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.NORMAL)
+            }
+            val dividerPaint = Paint().apply {
+                color = Color.parseColor("#E5E7EB")
+                strokeWidth = 1.2f
+            }
+
+            fun nextPage() {
+                pdf.finishPage(page)
+                pageNum += 1
+                page = pdf.startPage(PdfDocument.PageInfo.Builder(pageWidth, pageHeight, pageNum).create())
+                canvas = page!!.canvas
+            }
+
+            fun drawTextLayout(text: String, paint: TextPaint, x: Float, startY: Float): Float {
+                val layout = StaticLayout.Builder.obtain(text, 0, text.length, paint, contentWidth)
+                    .setAlignment(Layout.Alignment.ALIGN_NORMAL)
+                    .setLineSpacing(4f, 1.15f)
+                    .build()
+                var y = startY
+                if (y + layout.height > pageHeight - margin) {
+                    nextPage()
+                    y = margin.toFloat()
+                }
+                canvas.save()
+                canvas.translate(x, y)
+                layout.draw(canvas)
+                canvas.restore()
+                return y + layout.height
+            }
+
+            var cursorY = margin.toFloat() + 10f
+            cursorY = drawTextLayout(title, titlePaint, margin.toFloat(), cursorY)
             cursorY += 6f
-            // Split long bodies by paragraph so pages break cleanly
-            val paragraphs = body.split("\n\n").filter { it.isNotBlank() }
-            for (p in paragraphs) {
-                cursorY = drawTextLayout(p.trim(), bodyPaint, margin.toFloat(), cursorY)
-                cursorY += 8f
-            }
-            cursorY += 10f
-        }
+            cursorY = drawTextLayout(subtitle, subPaint, margin.toFloat(), cursorY)
+            cursorY += 14f
+            canvas.drawLine(margin.toFloat(), cursorY, (pageWidth - margin).toFloat(), cursorY, dividerPaint)
+            cursorY += 18f
 
-        pdf.finishPage(page)
-        FileOutputStream(outFile).use { fos ->
-            pdf.writeTo(fos)
-        }
-        pdf.close()
-        if (!outFile.exists() || outFile.length() < 120) {
+            for ((heading, body) in sections) {
+                if (cursorY > pageHeight - margin - 80) {
+                    nextPage()
+                    cursorY = margin.toFloat()
+                }
+                cursorY = drawTextLayout(heading, h2Paint, margin.toFloat(), cursorY)
+                cursorY += 6f
+                val paragraphs = body.split("\n\n").filter { it.isNotBlank() }
+                for (p in paragraphs) {
+                    cursorY = drawTextLayout(p.trim(), bodyPaint, margin.toFloat(), cursorY)
+                    cursorY += 8f
+                }
+                cursorY += 10f
+            }
+
+            pdf.finishPage(page)
+            FileOutputStream(outFile).use { fos ->
+                pdf.writeTo(fos)
+            }
+            pdf.close()
+            true
+        }.getOrDefault(false)
+
+        if (!renderedNative || !outFile.exists() || outFile.length() < 120) {
             return writeBasicPdfFallback(outFile, title, subtitle, sections)
         }
         return outFile
@@ -299,6 +302,12 @@ class OnDeviceSandbox(private val context: Context) {
                 val isZip = bytes.size >= 4 && bytes[0] == 0x50.toByte() && bytes[1] == 0x4B.toByte()
                 if (isZip) QaAuditResult(true, 93, "Valid ZIP archive verified (${bytes.size} bytes)")
                 else QaAuditResult(false, 35, "Corrupted ZIP header")
+            }
+            lower.endsWith(".svg") -> {
+                val text = String(bytes, Charsets.UTF_8)
+                val isSvg = text.contains("<svg", ignoreCase = true) && bytes.size >= 120
+                if (isSvg) QaAuditResult(true, 93, "Valid SVG vector graphic verified (${bytes.size} bytes)")
+                else QaAuditResult(false, 45, "Invalid or empty SVG graphic")
             }
             else -> {
                 val text = String(bytes, Charsets.UTF_8)

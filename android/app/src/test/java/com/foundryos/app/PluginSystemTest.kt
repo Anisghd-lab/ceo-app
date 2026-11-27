@@ -47,14 +47,16 @@ class PluginSystemTest {
     }
 
     @Test
-    fun registry_containsTwelvePluginsAndBuiltInPluginsAreConnected() {
-        assertEquals(12, PluginRegistry.ALL.size)
+    fun registry_containsFourteenPluginsAndBuiltInPluginsAreConnected() {
+        assertEquals(14, PluginRegistry.ALL.size)
         val ids = PluginRegistry.ALL.map { it.id }.toSet()
-        assertEquals(12, ids.size)
+        assertEquals(14, ids.size)
         assertTrue("browser" in ids)
         assertTrue("product_design" in ids)
         assertTrue("github" in ids)
         assertTrue("notion" in ids)
+        assertTrue("instagram" in ids)
+        assertTrue("tiktok" in ids)
 
         val summary = executor.activeToolsSummaryForPrompt()
         assertTrue(summary.contains("browser_search"))
@@ -148,5 +150,34 @@ class PluginSystemTest {
         assertEquals("output/landing.html", out.getString("rel_path"))
         val qa = sandbox.verifyArtifactProgrammatically("comp_design", "output/landing.html")
         assertTrue("Generated HTML prototype should pass programmatic QA: ${qa.report}", qa.passed)
+    }
+
+    @Test
+    fun instagramAndTikTok_gateWritesBehindApprovalAndCallApiWhenApproved() = runTest {
+        auth.saveToken("instagram", "ig_tok_test", accountLabel = "@formation_pro")
+        executor.apiBaseOverrides["instagram"] = server.url("").toString().trimEnd('/')
+
+        val staged = executor.execute(
+            companyId = "comp_social",
+            toolName = "instagram_reply_comment",
+            args = JSONObject().put("comment_id", "cmt_77").put("message", "Lien d'inscription envoyé en DM!"),
+            allowWriteExecution = false,
+        )
+        assertTrue(staged.ok)
+        assertTrue(staged.requiresApproval)
+        assertEquals(0, server.requestCount)
+
+        server.enqueue(MockResponse().setResponseCode(200).setBody("""{"id":"reply_901"}"""))
+        val exec = executor.execute(
+            companyId = "comp_social",
+            toolName = "instagram_reply_comment",
+            args = JSONObject().put("comment_id", "cmt_77").put("message", "Lien d'inscription envoyé en DM!"),
+            allowWriteExecution = true,
+        )
+        assertTrue(exec.ok)
+        val req = server.takeRequest()
+        assertEquals("POST", req.method)
+        assertEquals("/cmt_77/replies", req.path)
+        assertEquals("Bearer ig_tok_test", req.getHeader("Authorization"))
     }
 }

@@ -361,4 +361,83 @@ class AutonomousBotsEndToEndTest {
         assertTrue(db.listCompanies().none { it.id == cid })
         assertFalse(sandbox.resolveFile(cid, "output/note.txt").exists())
     }
+
+    @Test
+    fun courseCreationCompany_executesFullMultiStageTeamForTrendsDataGraphicsQaMarketingAndSocial() = runTest {
+        pluginExec.apiBaseOverrides["instagram"] = pluginServer.url("").toString().trimEnd('/')
+        auth.saveToken("instagram", "ig_token_course_live", accountLabel = "@formations_ia")
+
+        // 1) CEO designs the exact 8-role enterprise described by founder
+        aiServer.enqueue(
+            openAiWrap(
+                """{"name":"Atelier Formations IA","mission_statement":"Créer, illustrer, auditer, marketer et vendre des formations tendance.","strategy_summary":"Pipeline multi-étapes 100% autonome.","recommended_connectors":["Instagram","TikTok"],"bots":[
+                    {"name":"TrendHunter","role":"Trending Topics Scout","tagline":"Détecte les sujets porteurs","system_prompt":"Trouver les formations demandées via browser_search","allowed_tools":["browser_search"],"is_qa":false},
+                    {"name":"DataScout","role":"Data & Curriculum Researcher","tagline":"Collecte sources et data","system_prompt":"Rassembler les faits et modules via browser_search","allowed_tools":["browser_search","browser_read_url"],"is_qa":false},
+                    {"name":"VisualStudio","role":"Charts & Graphics Designer","tagline":"Crée graphes et visuels SVG","system_prompt":"Générer des graphiques SVG via create_svg_graphic","allowed_tools":["create_svg_graphic","product_design_prototype"],"is_qa":false},
+                    {"name":"CourseBuilder","role":"Course PDF Architect","tagline":"Rédige la formation complète","system_prompt":"Construire le guide PDF via create_pdf","allowed_tools":["create_pdf","sandbox_files"],"is_qa":false},
+                    {"name":"QualityAuditor","role":"Independent QA","tagline":"Audite chaque livrable","system_prompt":"Vérifier l'exactitude et la qualité","allowed_tools":["sandbox_files"],"is_qa":true},
+                    {"name":"MarketingVideo","role":"Video & Marketing Promo Creator","tagline":"Crée vidéos & pages promo","system_prompt":"Produire une landing/vidéo promo interactive HTML","allowed_tools":["product_design_prototype"],"is_qa":false},
+                    {"name":"SocialSales24x7","role":"Instagram/TikTok Growth & Customer Care","tagline":"Répond aux clients & vend 24/7","system_prompt":"Lire les commentaires et préparer réponses/ventes","allowed_tools":["instagram_list_comments","instagram_reply_comment"],"is_qa":false},
+                    {"name":"Memory","role":"Company Memory","tagline":"Synchronise l'entreprise","system_prompt":"Conserver les décisions et retours","allowed_tools":["company_memory"],"is_qa":false}
+                ]}"""
+            )
+        )
+        val proposal = engine.proposeCompany("Créer des formations avec tendance, data, graphismes, QA, marketing vidéo et suivi Instagram 24/7")
+        assertEquals(9, proposal.bots.size) // CEO + 8 specialists preserved!
+        val deployed = engine.deployCompany("Formation studio", proposal)
+
+        // 2) Founder triggers full pipeline
+        aiServer.enqueue(openAiWrap("""{"action":"run_mission","title":"Formation Agentic IA 2026","goal":"Créer et lancer la formation complète","ceo_reply":"Tous les agents passent à l'action étape par étape."}"""))
+
+        // Stage 1a: TrendHunter
+        pluginServer.enqueue(MockResponse().setResponseCode(200).setBody("""["ai course",["Generative AI"],["AI trend"],["https://en.wikipedia.org/wiki/AI"]]"""))
+        pluginServer.enqueue(MockResponse().setResponseCode(200).setBody("""{}"""))
+        pluginServer.enqueue(MockResponse().setResponseCode(200).setBody("""{}"""))
+        aiServer.enqueue(openAiWrap("""{"action":"tool","tool":"browser_search","args":{"query":"AI agents course trends 2026"}}"""))
+        aiServer.enqueue(openAiWrap("""{"action":"final","reply":"Tendance n°1 identifiée : Agents IA autonomes pour PME."}"""))
+
+        // Stage 1b: DataScout
+        aiServer.enqueue(openAiWrap("""{"action":"final","reply":"Programme structuré en 4 modules chiffrés (+42% adoption PME)."}"""))
+
+        // Stage 2a: CourseBuilder (Producer)
+        aiServer.enqueue(openAiWrap("""{"action":"tool","tool":"create_pdf","args":{"filename":"formation_agentic_ia.pdf","title":"Formation Agentic IA 2026","subtitle":"Atelier Formations IA","sections":[{"heading":"Module 1","body":"Architecture multi-agents concrète."},{"heading":"Module 2","body":"Workflows, QA et ventes."}]}}"""))
+        aiServer.enqueue(openAiWrap("""{"action":"final","summary":"Formation PDF prête."}"""))
+
+        // Stage 2b: VisualStudio creates vector SVG chart before QA
+        aiServer.enqueue(openAiWrap("""{"action":"tool","tool":"create_svg_graphic","args":{"filename":"courbe_marche.svg","title":"Demande Formations IA 2026","summary":"Croissance +42%"}}"""))
+        aiServer.enqueue(openAiWrap("""{"action":"final","reply":"Graphique SVG courbe_marche.svg créé dans output/."}"""))
+
+        // Stage 3: QualityAuditor
+        aiServer.enqueue(openAiWrap("""{"passed":true,"score":96,"report":"Formation PDF + visuel SVG conformes."}"""))
+
+        // Stage 4a: MarketingVideo creates HTML5 interactive promo video reel
+        aiServer.enqueue(openAiWrap("""{"action":"tool","tool":"product_design_prototype","args":{"filename":"promo_video_reel.html","title":"Vidéo Promo Formation IA","summary":"Storyboard animé 30s + bouton achat."}}"""))
+        aiServer.enqueue(openAiWrap("""{"action":"final","reply":"Page/vidéo marketing promo_video_reel.html prête."}"""))
+
+        // Stage 4b: SocialSales24x7 inspects Instagram comments & stages customer reply approval!
+        pluginServer.enqueue(MockResponse().setResponseCode(200).setBody("""{"data":[{"id":"cmt_99","username":"sara_dev","text":"C'est combien la formation ?"}]}"""))
+        aiServer.enqueue(openAiWrap("""{"action":"tool","tool":"instagram_list_comments","args":{"media_id":"media_123"}}"""))
+        aiServer.enqueue(openAiWrap("""{"action":"tool","tool":"instagram_reply_comment","args":{"comment_id":"cmt_99","message":"Bonjour Sara ! La formation est à 149€ avec accès à vie — lien envoyé !"}}"""))
+        aiServer.enqueue(openAiWrap("""{"action":"final","reply":"Commentaire client analysé et réponse commerciale préparée pour approbation."}"""))
+
+        engine.handleFounderMessage(deployed.id, "Lance la création complète et le marketing de notre première formation IA")
+
+        val timeline = db.listMessages(deployed.id).map { it.content }
+        assertTrue("TrendHunter must report", timeline.any { it.contains("[TrendHunter → CEO]") })
+        assertTrue("DataScout must report", timeline.any { it.contains("[DataScout → CEO]") })
+        assertTrue("CourseBuilder must report", timeline.any { it.contains("[CourseBuilder → CEO]") })
+        assertTrue("VisualStudio must report", timeline.any { it.contains("[VisualStudio → CEO]") })
+        assertTrue("QualityAuditor must report", timeline.any { it.contains("[QualityAuditor → CEO]") })
+        assertTrue("MarketingVideo must report", timeline.any { it.contains("[MarketingVideo → CEO]") })
+        assertTrue("SocialSales24x7 must report", timeline.any { it.contains("[SocialSales24x7 → CEO]") })
+        assertTrue("Memory must report", timeline.any { it.contains("[Memory → CEO]") })
+
+        assertTrue("PDF deliverable must exist", sandbox.resolveFile(deployed.id, "output/formation_agentic_ia.pdf").exists())
+        assertTrue("SVG graphic deliverable must exist", sandbox.resolveFile(deployed.id, "output/courbe_marche.svg").exists())
+        assertTrue("Promo HTML reel must exist", sandbox.resolveFile(deployed.id, "output/promo_video_reel.html").exists())
+        assertTrue(
+            "Instagram reply write must be staged for Human Approval alongside final Ship approval",
+            db.listMessages(deployed.id).count { it.approval != null } >= 2,
+        )
+    }
 }

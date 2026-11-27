@@ -119,6 +119,11 @@ class PluginToolExecutor(
                 "canva_list_designs" -> execCanvaDesigns(args.optString("query"))
                 "scite_search" -> execSciteSearch(args.optString("query"))
                 "tinyfish_extract" -> execTinyFish(args)
+                "instagram_list_comments" -> execInstagramComments(args)
+                "instagram_reply_comment" -> execInstagramReply(args)
+                "instagram_publish_post" -> execInstagramPublish(args)
+                "tiktok_list_videos" -> execTikTokVideos(args)
+                "tiktok_publish_video" -> execTikTokPublish(args)
                 else -> PluginToolResult(false, "Unknown plugin tool: $toolName")
             }
         } catch (e: Exception) {
@@ -528,6 +533,84 @@ class PluginToolExecutor(
         return http.newCall(req).execute().use { resp ->
             if (resp.isSuccessful) PluginToolResult(true, resp.body?.string().orEmpty().take(5500))
             else execBrowserReadUrl(targetUrl)
+        }
+    }
+
+    private fun execInstagramComments(args: JSONObject): PluginToolResult {
+        val tok = requireToken("instagram", "Instagram")
+            ?: return PluginToolResult(false, "Instagram not connected. Open Settings -> Plugins -> Instagram to sign in or add Graph token.")
+        val mediaId = args.optString("media_id").ifBlank { return PluginToolResult(false, "Missing media_id") }
+        val url = "${baseUrl("instagram", "https://graph.facebook.com/v20.0")}/$mediaId/comments?fields=id,text,username,timestamp&limit=25"
+        val req = Request.Builder().url(url).header("Authorization", "Bearer $tok").get().build()
+        return http.newCall(req).execute().use { resp ->
+            PluginToolResult(resp.isSuccessful, resp.body?.string().orEmpty().take(5000))
+        }
+    }
+
+    private fun execInstagramReply(args: JSONObject): PluginToolResult {
+        val tok = requireToken("instagram", "Instagram") ?: return PluginToolResult(false, "Instagram token missing.")
+        val commentId = args.optString("comment_id").ifBlank { return PluginToolResult(false, "Missing comment_id") }
+        val msg = args.optString("message").ifBlank { return PluginToolResult(false, "Missing message") }
+        val payload = JSONObject().put("message", msg)
+        val url = "${baseUrl("instagram", "https://graph.facebook.com/v20.0")}/$commentId/replies"
+        val req = Request.Builder().url(url).header("Authorization", "Bearer $tok")
+            .post(payload.toString().toRequestBody(jsonMedia)).build()
+        return http.newCall(req).execute().use { resp ->
+            PluginToolResult(resp.isSuccessful, resp.body?.string().orEmpty().take(2000))
+        }
+    }
+
+    private fun execInstagramPublish(args: JSONObject): PluginToolResult {
+        val tok = requireToken("instagram", "Instagram") ?: return PluginToolResult(false, "Instagram token missing.")
+        val igUser = args.optString("ig_user_id").ifBlank { return PluginToolResult(false, "Missing ig_user_id") }
+        val base = baseUrl("instagram", "https://graph.facebook.com/v20.0")
+        val createPayload = JSONObject()
+            .put("image_url", args.optString("image_url"))
+            .put("caption", args.optString("caption"))
+        val createReq = Request.Builder().url("$base/$igUser/media")
+            .header("Authorization", "Bearer $tok")
+            .post(createPayload.toString().toRequestBody(jsonMedia)).build()
+        val containerId = http.newCall(createReq).execute().use { resp ->
+            val raw = resp.body?.string().orEmpty()
+            if (!resp.isSuccessful) return PluginToolResult(false, "Instagram container HTTP ${resp.code}: ${raw.take(200)}")
+            JSONObject(raw).optString("id")
+        }
+        if (containerId.isBlank()) return PluginToolResult(false, "Instagram did not return a creation_id")
+        val pubReq = Request.Builder().url("$base/$igUser/media_publish")
+            .header("Authorization", "Bearer $tok")
+            .post(JSONObject().put("creation_id", containerId).toString().toRequestBody(jsonMedia)).build()
+        return http.newCall(pubReq).execute().use { resp ->
+            PluginToolResult(resp.isSuccessful, resp.body?.string().orEmpty().take(2000))
+        }
+    }
+
+    private fun execTikTokVideos(args: JSONObject): PluginToolResult {
+        val tok = requireToken("tiktok", "TikTok")
+            ?: return PluginToolResult(false, "TikTok not connected. Open Settings -> Plugins -> TikTok to sign in or add OAuth token.")
+        val maxCount = args.optInt("max_count", 10).coerceIn(1, 20)
+        val base = baseUrl("tiktok", "https://open.tiktokapis.com/v2")
+        val req = Request.Builder()
+            .url("$base/video/list/?fields=id,title,video_description,view_count,like_count,comment_count")
+            .header("Authorization", "Bearer $tok")
+            .post(JSONObject().put("max_count", maxCount).toString().toRequestBody(jsonMedia))
+            .build()
+        return http.newCall(req).execute().use { resp ->
+            PluginToolResult(resp.isSuccessful, resp.body?.string().orEmpty().take(5000))
+        }
+    }
+
+    private fun execTikTokPublish(args: JSONObject): PluginToolResult {
+        val tok = requireToken("tiktok", "TikTok") ?: return PluginToolResult(false, "TikTok token missing.")
+        val base = baseUrl("tiktok", "https://open.tiktokapis.com/v2")
+        val payload = JSONObject()
+            .put("post_info", JSONObject().put("title", args.optString("title")).put("privacy_level", "SELF_ONLY"))
+            .put("source_info", JSONObject().put("source", "PULL_FROM_URL").put("video_url", args.optString("video_url")))
+        val req = Request.Builder().url("$base/post/publish/video/init/")
+            .header("Authorization", "Bearer $tok")
+            .post(payload.toString().toRequestBody(jsonMedia))
+            .build()
+        return http.newCall(req).execute().use { resp ->
+            PluginToolResult(resp.isSuccessful, resp.body?.string().orEmpty().take(2000))
         }
     }
 

@@ -205,6 +205,43 @@ object PluginRegistry {
                 PluginToolDef("scite_search", "Search scientific papers & smart citation tallies on Scite", false, "{\"query\":\"...\"}"),
             ),
         ),
+        PluginDefinition(
+            id = "instagram",
+            name = "Instagram",
+            category = "Social & Growth 24/7",
+            tagline = "Read insights & comments, reply to DMs/comments & publish Reels/Posts",
+            authType = PluginAuthType.OAUTH_PKCE,
+            loginUrl = "https://www.instagram.com/accounts/login/",
+            authorizeUrl = "https://www.facebook.com/v20.0/dialog/oauth",
+            tokenUrl = "https://graph.facebook.com/v20.0/oauth/access_token",
+            scopes = "instagram_basic,instagram_manage_comments,instagram_content_publish,pages_show_list",
+            apiBaseUrl = "https://graph.facebook.com/v20.0",
+            keyPortalUrl = "https://developers.facebook.com/apps/",
+            cookieDomain = "https://www.instagram.com",
+            tools = listOf(
+                PluginToolDef("instagram_list_comments", "List recent comments/questions on an Instagram media post", false, "{\"media_id\":\"...\"}"),
+                PluginToolDef("instagram_reply_comment", "Reply to a customer/prospect comment on Instagram (requires Human Yes)", true, "{\"comment_id\":\"...\",\"message\":\"...\"}"),
+                PluginToolDef("instagram_publish_post", "Publish an approved image/Reel post to Instagram (requires Human Yes)", true, "{\"ig_user_id\":\"...\",\"image_url\":\"...\",\"caption\":\"...\"}"),
+            ),
+        ),
+        PluginDefinition(
+            id = "tiktok",
+            name = "TikTok",
+            category = "Social & Short Video 24/7",
+            tagline = "Track video stats, manage creator account & stage promotional Reels",
+            authType = PluginAuthType.OAUTH_PKCE,
+            loginUrl = "https://www.tiktok.com/login",
+            authorizeUrl = "https://www.tiktok.com/v2/auth/authorize/",
+            tokenUrl = "https://open.tiktokapis.com/v2/oauth/token/",
+            scopes = "user.info.basic,video.list,video.publish",
+            apiBaseUrl = "https://open.tiktokapis.com/v2",
+            keyPortalUrl = "https://developers.tiktok.com/",
+            cookieDomain = "https://www.tiktok.com",
+            tools = listOf(
+                PluginToolDef("tiktok_list_videos", "List published TikTok videos & view/engagement counts", false, "{\"max_count\":10}"),
+                PluginToolDef("tiktok_publish_video", "Stage/publish a marketing video to TikTok (requires Human Yes)", true, "{\"video_url\":\"...\",\"title\":\"...\"}"),
+            ),
+        ),
     )
 
     fun byId(id: String): PluginDefinition? = ALL.firstOrNull { it.id.equals(id, ignoreCase = true) }

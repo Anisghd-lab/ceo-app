@@ -53,7 +53,7 @@ jobs:
       - name: Run Android JVM Unit & Integration Tests
         working-directory: android
         run: |
-          gradle testDebugUnitTest --no-daemon --console=plain
+          gradle testDebugUnitTest --no-daemon --console=plain --stacktrace
           grep -h "<testsuite " app/build/test-results/testDebugUnitTest/TEST-*.xml || true
 
       - name: Compile Debug APK (Persistent Signature)

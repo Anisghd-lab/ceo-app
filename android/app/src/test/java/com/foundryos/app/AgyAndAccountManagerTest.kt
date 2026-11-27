@@ -70,11 +70,11 @@ class AgyAndAccountManagerTest {
         val installer = AgyCliInstaller(context)
         val mgr = AgyAccountManager(installer.homeDir())
 
-        val authDir = File(installer.homeDir(), ".config/agy-auth").apply { mkdirs() }
-        val agyCliDir = File(installer.homeDir(), ".config/antigravity-cli").apply { mkdirs() }
+        val geminiDir = File(installer.homeDir(), ".gemini").apply { mkdirs() }
+        val agyCliDir = File(geminiDir, "antigravity-cli").apply { mkdirs() }
 
-        val acct1Json = """{"refresh_token":"tok_alpha","email":"alpha@example.com","name":"Alpha User","writer_id":"stale_writer_1"}"""
-        File(authDir, "jetski-standalone-oauth-token").writeText(acct1Json)
+        val acct1Json = """{"id_token_email":"alpha@example.com","auth_method":"oauth","token":{"refresh_token":"tok_alpha","name":"Alpha User"},"writer_id":"stale_writer_1"}"""
+        File(geminiDir, "jetski-standalone-oauth-token").writeText(acct1Json)
         assertTrue(mgr.ensureTokensSynced())
 
         val mirroredCli = File(agyCliDir, "antigravity-oauth-token")
@@ -87,8 +87,8 @@ class AgyAndAccountManagerTest {
         assertTrue(accountsAfter1.any { it.email == "alpha@example.com" })
 
         // Add second account and ensure switching back restores first cleanly without writer_id collisions
-        File(authDir, "jetski-standalone-oauth-token").writeText(
-            """{"refresh_token":"tok_beta","email":"beta@example.com","name":"Beta User"}"""
+        File(geminiDir, "jetski-standalone-oauth-token").writeText(
+            """{"id_token_email":"beta@example.com","auth_method":"oauth","token":{"refresh_token":"tok_beta","name":"Beta User"}}"""
         )
         val (saved2Ok, _) = mgr.saveCurrentAccount()
         assertTrue(saved2Ok)
@@ -96,7 +96,7 @@ class AgyAndAccountManagerTest {
 
         val (switchOk, _) = mgr.switchToAccount("alpha@example.com")
         assertTrue(switchOk)
-        val liveText = File(authDir, "jetski-standalone-oauth-token").readText()
+        val liveText = File(geminiDir, "jetski-standalone-oauth-token").readText()
         assertTrue(liveText.contains("tok_alpha"))
         assertFalse("writer_id must be stripped from switched snapshots", liveText.contains("writer_id"))
         assertTrue(File(agyCliDir, "antigravity-oauth-token").readText().contains("tok_alpha"))

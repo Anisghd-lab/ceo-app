@@ -9,10 +9,12 @@
 
 ## 2. État d'Avancement Réel
 - [x] **Antigravity CLI Native Engine (`android/app/.../agy/`)** : binaire ARM64 vérifié SHA-512, superviseur `agy --hub`, parsing exact des événements `--output-format stream-json`, multi-comptes Google sans révocation, quotas `5h`/`Weekly` & par modèle.
-- [x] **Store de Plugins & Exécuteur Unifié (`android/app/.../plugins/`)** :
-  - `PluginRegistry.kt` : 12 plugins pré-configurés (`browser`, `notion`, `slack`, `github`, `gmail`, `gdrive`, `figma`, `canva`, `kittl`, `product_design`, `tinyfish`, `scite`).
+- [x] **Store de Plugins (`14 plugins` dont Instagram & TikTok, `android/app/.../plugins/`)** :
+  - `PluginRegistry.kt` : 14 plugins pré-configurés (`browser`, `notion`, `slack`, `github`, `gmail`, `gdrive`, `figma`, `canva`, `kittl`, `product_design`, `tinyfish`, `scite`, `instagram`, `tiktok`).
   - `PluginAuthManager.kt` : OAuth 2.0 PKCE + loopback local `127.0.0.1`, MCP Dynamic Client Registration + PKCE, détection automatique des sessions cookies dans le navigateur interne `CEO`, tokens/clés optionnels.
-  - `PluginToolExecutor.kt` : exécution directe des outils lecture/recherche/prototypage HTML, et verrou d'approbation humaine (`Ship / Not yet`) pour toute action d'écriture externe (Slack, Gmail, GitHub Issue, Notion Page, Drive Upload).
+  - `PluginToolExecutor.kt` : exécution directe des outils recherche/lecture/prototypage/réseaux sociaux, et verrou d'approbation humaine (`Ship / Not yet`) pour toute action d'écriture externe (Slack, Gmail, GitHub Issue, Notion Page, Drive Upload, Instagram reply/publish, TikTok publish).
+- [x] **Pipeline Multi-Agents à 5 Étapes (`3 à 8 spécialistes`) & Graphiques Vectoriels (`AutonomousEngine.kt`)** :
+  - Découpage automatique par étapes selon le rôle réel : **Étape 1** Recherche/Tendances/Data → **Étape 2** Production PDF/Code + Graphiques SVG (`create_svg_graphic`) → **Étape 3** Audit QA (+ révision si `< 70`) → **Étape 4** Studio Marketing/Vidéo HTML (`product_design_prototype`) + Réseaux Sociaux/Ventes → **Étape 5** Mémoire + Gate `Ship`.
 - [x] **Agents Hyper-Agentic (`AutonomousEngine.kt`)** :
   - Raisonnement réel du CEO via `agy CLI` dès qu'on clique sur CEO (`runCeoReasoningTurn`) + boucle multi-étapes ReAct à 6 pas sur le CEO et tous les bots (`runDirectBotChat`, `runFullMission`), avec cycle de révision automatique QA → Creator si score `< 70`.
 - [x] **Signature Persistante & Auto-Updater In-App (`AppUpdateManager.kt`, CI Secrets)** :
@@ -43,6 +45,6 @@
 - Tests d'instrumentation UI Compose sur appareil Android physique / émulateur non encore inclus dans le pipeline CI.
 
 ## 4. Prochaines Étapes
-1. Ajouter la sélection individuelle de modèle (`agy` / LLM) par bot depuis l'organigramme `Company Org`.
-2. Ajouter la capture d'écran WebView directe vers `sandbox/output/` pour l'outil `browser_read_url`.
-3. Tester les flux OAuth PKCE & MCP end-to-end sur appareil réel.
+1. Ajouter un planificateur `WorkManager` / Service Android en arrière-plan pour la veille et les réponses clients 24/7 même écran verrouillé (en utilisant les tokens OAuth Instagram/TikTok/Gmail).
+2. Ajouter la sélection individuelle de modèle (`agy` / FreeLLMAPI / LLM) par bot depuis l'organigramme `Company Org`.
+3. Ajouter des tests d'instrumentation Compose UI sur émulateur Android dans CI.

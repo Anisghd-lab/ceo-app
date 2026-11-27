@@ -2,11 +2,19 @@ package com.foundryos.app.data
 
 import android.content.Context
 import android.content.Intent
+import android.net.Uri
+import android.provider.OpenableColumns
 import androidx.core.content.FileProvider
+import com.foundryos.app.agy.AgyInstallProgress
+import com.foundryos.app.agy.AgyRuntimeManager
 import com.foundryos.app.engine.AutonomousEngine
 import com.foundryos.app.engine.LocalDatabase
 import com.foundryos.app.engine.OnDeviceLLMClient
 import com.foundryos.app.engine.OnDeviceSandbox
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.withContext
 import java.io.File
 import java.util.UUID
 
@@ -14,12 +22,37 @@ import java.util.UUID
  * Unified 100% On-Device Repository (Zero VPS / Zero External Server required).
  */
 class FoundryRepository(private val context: Context) {
+    companion object {
+        @Volatile
+        private var sharedAgy: AgyRuntimeManager? = null
+
+        fun agyManager(context: Context): AgyRuntimeManager {
+            return sharedAgy ?: synchronized(this) {
+                sharedAgy ?: AgyRuntimeManager(context.applicationContext).also { sharedAgy = it }
+            }
+        }
+    }
+
     private val db = LocalDatabase(context)
     private val sandbox = OnDeviceSandbox(context)
     private val llm = OnDeviceLLMClient(context)
-    private val engine = AutonomousEngine(context, db, sandbox, llm)
+    private val agy = agyManager(context)
+    private val engine = AutonomousEngine(context, db, sandbox, llm, agy)
 
-    fun engineStatus(): Pair<Boolean, String> = llm.hasAnyKey() to llm.activeProviderSummary()
+    fun engineStatus(): Pair<Boolean, String> {
+        val agyReady = agy.preferAgyEngine && agy.installer.isInstalled() && agy.accounts.readLiveToken() != null
+        if (agyReady) {
+            val email = agy.accounts.liveEmail().ifBlank { "Google Account" }
+            return true to "Antigravity CLI · $email (${agy.selectedModel})"
+        }
+        if (llm.hasAnyKey()) {
+            return true to llm.activeProviderSummary()
+        }
+        if (agy.installer.isInstalled()) {
+            return false to "Antigravity CLI installed — sign in with Google in Settings"
+        }
+        return false to llm.activeProviderSummary()
+    }
 
     fun fetchCompanies(): List<CompanyItem> = db.listCompanies()
 
@@ -41,13 +74,88 @@ class FoundryRepository(private val context: Context) {
         sandbox.destroySandbox(companyId)
     }
 
+    fun inspectLocalUri(uri: Uri): AttachedLocalFile? {
+        val resolver = context.contentResolver
+        var name = "file_${System.currentTimeMillis() % 10000}"
+        var size = 0L
+        runCatching {
+            resolver.query(uri, null, null, null, null)?.use { cur ->
+                val nameIdx = cur.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                val sizeIdx = cur.getColumnIndex(OpenableColumns.SIZE)
+                if (cur.moveToFirst()) {
+                    if (nameIdx >= 0) name = cur.getString(nameIdx) ?: name
+                    if (sizeIdx >= 0 && !cur.isNull(sizeIdx)) size = cur.getLong(sizeIdx)
+                }
+            }
+        }
+        val mime = resolver.getType(uri) ?: "application/octet-stream"
+        val isTextLike = mime.startsWith("text/") ||
+            listOf("json", "xml", "csv", "md", "txt", "kt", "py", "js", "ts", "html", "yaml", "yml").any {
+                name.lowercase().endsWith(".$it")
+            }
+        val snippet = if (isTextLike && size <= 256_000) {
+            runCatching {
+                resolver.openInputStream(uri)?.bufferedReader(Charsets.UTF_8)?.use { it.readText().take(8000) }
+            }.getOrNull()
+        } else null
+
+        return AttachedLocalFile(
+            uriString = uri.toString(),
+            name = name,
+            sizeBytes = size,
+            mimeType = mime,
+            textSnippet = snippet,
+        )
+    }
+
+    suspend fun importAttachmentsIntoSandbox(
+        companyId: String,
+        attachments: List<AttachedLocalFile>,
+    ): String = withContext(Dispatchers.IO) {
+        if (attachments.isEmpty()) return@withContext ""
+        val resolver = context.contentResolver
+        val notes = StringBuilder("Attached local files imported into company sandbox:\n")
+        for (att in attachments) {
+            val uri = Uri.parse(att.uriString)
+            val bytes = runCatching {
+                resolver.openInputStream(uri)?.use { it.readBytes() }
+            }.getOrNull()
+            if (bytes != null) {
+                val saved = sandbox.writeUploadBytes(companyId, att.name, bytes)
+                val rel = "workspace/uploads/${saved.name}"
+                notes.append("- $rel (${bytes.size} bytes, ${att.mimeType})\n")
+                if (!att.textSnippet.isNullOrBlank()) {
+                    notes.append("  Content preview:\n${att.textSnippet.take(4000)}\n")
+                }
+            }
+        }
+        notes.toString()
+    }
+
     suspend fun sendFounderMessage(
         companyId: String,
         text: String,
+        attachments: List<AttachedLocalFile> = emptyList(),
         targetBotId: String? = null,
         onStatusUpdate: suspend (String) -> Unit = {},
     ) {
-        engine.handleFounderMessage(companyId, text, targetBotId, onStatusUpdate)
+        val attachmentsContext = importAttachmentsIntoSandbox(companyId, attachments)
+        val displayMsg = buildString {
+            if (attachments.isNotEmpty()) {
+                append(attachments.joinToString("\n") { "📎 ${it.name} (${it.sizeBytes} B)" })
+                if (text.isNotBlank()) append("\n\n")
+            }
+            append(text)
+        }.ifBlank { "Attached ${attachments.size} file(s)" }
+
+        engine.handleFounderMessage(
+            companyId = companyId,
+            text = text.ifBlank { "Inspect and process the attached local files." },
+            attachmentsSummary = attachmentsContext,
+            displayMessage = displayMsg,
+            targetBotId = targetBotId,
+            onStatusUpdate = onStatusUpdate,
+        )
     }
 
     fun requestBoardMeeting(companyId: String): BoardMeetingData = engine.generateBoardMeeting(companyId)
@@ -103,13 +211,66 @@ class FoundryRepository(private val context: Context) {
 
     fun getProviderStatuses(): List<ProviderStatus> = llm.getProviderStatuses()
 
-    fun saveProviderKey(provider: String, apiKey: String, model: String) {
-        llm.saveProviderKey(provider, apiKey, model)
-    }
+    fun getProviderKey(provider: String): String = llm.getProviderKey(provider)
 
-    suspend fun testProviderKey(provider: String): Pair<Boolean, String> = llm.testProvider(provider)
+    fun getCachedModels(provider: String): List<RemoteModelInfo> = llm.getCachedModels(provider)
+
+    fun addCustomProvider(name: String, baseUrl: String, protocol: String = "openai"): String =
+        llm.addCustomProvider(name, baseUrl, protocol)
+
+    fun deleteCustomProvider(providerId: String) = llm.deleteCustomProvider(providerId)
+
+    suspend fun fetchAvailableModels(provider: String, apiKey: String) = llm.fetchAvailableModels(provider, apiKey)
+
+    suspend fun saveAndTestModel(provider: String, modelId: String): Pair<Boolean, String> =
+        llm.saveAndTestModel(provider, modelId)
 
     fun updateBotModel(botId: String, model: String) = db.updateBotModel(botId, model)
+
+    fun sandboxesRootDir(): File = sandbox.sandboxesBaseDir()
+
+    fun agyLoginUrlEvents(): SharedFlow<String> = agy.loginUrlEvents
+
+    fun agyStateTick(): StateFlow<Long> = agy.stateTick
+
+    fun isAgyPreferEnabled(): Boolean = agy.preferAgyEngine
+
+    fun setAgyPreferEnabled(enabled: Boolean) {
+        agy.preferAgyEngine = enabled
+    }
+
+    fun getAgySelectedModel(): String = agy.selectedModel
+
+    fun setAgySelectedModel(modelId: String) {
+        agy.selectedModel = modelId
+    }
+
+    suspend fun getAgyCliStatus(): AgyCliStatus = agy.getCliStatus()
+
+    suspend fun ensureAgyHubStarted(): Boolean =
+        if (agy.installer.isInstalled()) agy.ensureHubRunning(sandbox.sandboxesBaseDir()) else false
+
+    suspend fun installOrUpdateAgy(onProgress: suspend (AgyInstallProgress) -> Unit = {}): Pair<Boolean, String> =
+        agy.installer.installOrUpdate(onProgress)
+
+    suspend fun getAgyAuthState(): AgyAuthState = agy.getAuthState(sandbox.sandboxesBaseDir())
+
+    suspend fun startAgyGoogleLogin(onSignedIn: suspend () -> Unit = {}): Pair<Boolean, String> =
+        agy.startGoogleLogin(sandbox.sandboxesBaseDir(), onSignedIn)
+
+    suspend fun addAnotherAgyAccount(onSignedIn: suspend () -> Unit = {}): Pair<Boolean, String> =
+        agy.addAnotherGoogleAccount(sandbox.sandboxesBaseDir(), onSignedIn)
+
+    suspend fun switchAgyAccount(email: String): Pair<Boolean, String> =
+        agy.switchGoogleAccount(email, sandbox.sandboxesBaseDir())
+
+    fun saveCurrentAgyAccount(fallbackEmail: String = ""): Pair<Boolean, String> =
+        agy.accounts.saveCurrentAccount(fallbackEmail)
+
+    fun deleteAgyAccount(email: String): Boolean = agy.accounts.deleteSavedAccount(email)
+
+    suspend fun fetchAgyModelsAndQuotas(): Pair<List<AgyModelInfo>, List<AgyQuotaGroup>> =
+        agy.fetchModelsAndQuotas(sandbox.sandboxesBaseDir())
 
     var killSwitch: Boolean
         get() = engine.killSwitch

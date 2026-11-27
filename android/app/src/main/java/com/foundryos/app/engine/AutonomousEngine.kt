@@ -2,6 +2,7 @@ package com.foundryos.app.engine
 
 import android.content.Context
 import android.webkit.MimeTypeMap
+import com.foundryos.app.agy.AgyRuntimeManager
 import com.foundryos.app.data.ApprovalItem
 import com.foundryos.app.data.ArtifactItem
 import com.foundryos.app.data.BoardMeetingData
@@ -32,6 +33,7 @@ class AutonomousEngine(
     private val db: LocalDatabase,
     private val sandbox: OnDeviceSandbox,
     private val llm: OnDeviceLLMClient,
+    private val agy: AgyRuntimeManager? = null,
 ) {
     private val prefs = context.getSharedPreferences("ceo_engine_prefs", Context.MODE_PRIVATE)
     private val httpClient = OkHttpClient.Builder()
@@ -41,7 +43,70 @@ class AutonomousEngine(
 
     var killSwitch: Boolean
         get() = prefs.getBoolean("kill_switch", false)
-        set(value) = prefs.edit().putBoolean("kill_switch", value).apply()
+        set(value) {
+            prefs.edit().putBoolean("kill_switch", value).apply()
+            if (value) {
+                agy?.stopActiveRun()
+            }
+        }
+
+    fun hasActiveEngine(): Boolean =
+        llm.hasAnyKey() || canUseAgyEngine()
+
+    private fun canUseAgyEngine(): Boolean =
+        agy != null && agy.preferAgyEngine && agy.installer.isInstalled() && agy.accounts.readLiveToken() != null
+
+    private suspend fun runAiCompletion(
+        systemPrompt: String,
+        userPrompt: String,
+        sandboxDir: File? = null,
+        modelSpec: String = "auto",
+        jsonMode: Boolean = false,
+        maxTokens: Int = 1800,
+        onStatus: suspend (String) -> Unit = {},
+    ): LLMResponse {
+        if (canUseAgyEngine()) {
+            val runtime = agy!!
+            val targetDir = sandboxDir ?: runtime.installer.homeDir()
+            val prompt = buildString {
+                append(systemPrompt.trim())
+                if (jsonMode) {
+                    append("\n\nCRITICAL: Respond with valid JSON only, without markdown commentary outside JSON.")
+                }
+                append("\n\nTask:\n")
+                append(userPrompt.trim())
+            }
+            val modelId = when {
+                modelSpec.startsWith("agy:", ignoreCase = true) -> modelSpec.removePrefix("agy:").ifBlank { runtime.selectedModel }
+                modelSpec.isBlank() || modelSpec == "auto" || ":" in modelSpec -> runtime.selectedModel
+                else -> modelSpec
+            }
+            val (ok, output) = runtime.runPrompt(
+                sandboxDir = targetDir,
+                prompt = prompt,
+                modelId = modelId,
+                onStatus = onStatus,
+            )
+            if (ok && output.isNotBlank()) {
+                return LLMResponse(
+                    ok = true,
+                    content = output,
+                    provider = "antigravity",
+                    model = modelId,
+                    tokensUsed = (output.length / 4).coerceAtLeast(1),
+                )
+            }
+            if (!llm.hasAnyKey()) {
+                return LLMResponse(ok = false, error = output.ifBlank { "Antigravity CLI failed" })
+            }
+        }
+        return llm.complete(
+            messages = listOf("system" to systemPrompt, "user" to userPrompt),
+            modelSpec = modelSpec,
+            jsonMode = jsonMode,
+            maxTokens = maxTokens,
+        )
+    }
 
     private val avatarPalette = listOf(
         "triangle" to "#EC4899",
@@ -89,11 +154,10 @@ class AutonomousEngine(
             }
         """.trimIndent()
 
-        val resp = llm.complete(
-            messages = listOf(
-                "system" to "You are a precise organizational architect. Output valid JSON only.",
-                "user" to prompt,
-            ),
+        val resp = runAiCompletion(
+            systemPrompt = "You are a precise organizational architect. Output valid JSON only.",
+            userPrompt = prompt,
+            sandboxDir = sandbox.sandboxesBaseDir(),
             jsonMode = true,
             maxTokens = 1800,
         )
@@ -320,11 +384,13 @@ class AutonomousEngine(
     suspend fun handleFounderMessage(
         companyId: String,
         text: String,
+        attachmentsSummary: String = "",
+        displayMessage: String = text,
         targetBotId: String? = null,
         onStatusUpdate: suspend (String) -> Unit = {},
     ) {
         val comp = db.getCompany(companyId) ?: return
-        db.insertMessage(ChatMessageItem("msg_${UUID.randomUUID().toString().take(10)}", companyId, "human", content = text))
+        db.insertMessage(ChatMessageItem("msg_${UUID.randomUUID().toString().take(10)}", companyId, "human", content = displayMessage))
 
         if (killSwitch) {
             db.insertMessage(
@@ -339,13 +405,15 @@ class AutonomousEngine(
             return
         }
 
+        val enrichedPrompt = if (attachmentsSummary.isBlank()) text else "$text\n\n$attachmentsSummary"
+
         val bots = db.listBots(companyId)
         if (targetBotId != null) {
             val targetBot = bots.firstOrNull { it.id == targetBotId }
             if (targetBot != null && !targetBot.isCeo) {
                 onStatusUpdate("${targetBot.name} is thinking...")
                 db.updateBotStatus(targetBot.id, "working", "Handling your message...")
-                val reply = runDirectBotChat(comp, targetBot, text)
+                val reply = runDirectBotChat(comp, targetBot, enrichedPrompt)
                 db.updateBotStatus(targetBot.id, "idle", reply.take(50))
                 db.insertMessage(
                     ChatMessageItem(
@@ -367,17 +435,16 @@ class AutonomousEngine(
             return
         }
 
-        runFullMission(comp, bots, title = text.take(58), goal = text, onStatusUpdate = onStatusUpdate)
+        runFullMission(comp, bots, title = text.ifBlank { "Analyze attached files" }.take(58), goal = enrichedPrompt, onStatusUpdate = onStatusUpdate)
     }
 
     private suspend fun runDirectBotChat(comp: CompanyItem, bot: BotItem, userText: String): String {
         val mem = db.recallNotes(comp.id, 6).joinToString("\n")
         val files = sandbox.listFiles(comp.id).joinToString(", ") { "${it.first} (${it.second}B)" }
-        val res = llm.complete(
-            messages = listOf(
-                "system" to "You are ${bot.name} (${bot.role}) at '${comp.name}'. Instructions: ${bot.systemPrompt}\nSandbox files: ${files.ifBlank { "none" }}\nCompany memory:\n$mem",
-                "user" to userText,
-            ),
+        val res = runAiCompletion(
+            systemPrompt = "You are ${bot.name} (${bot.role}) at '${comp.name}'. Instructions: ${bot.systemPrompt}\nSandbox files: ${files.ifBlank { "none" }}\nCompany memory:\n$mem",
+            userPrompt = userText,
+            sandboxDir = sandbox.companyRoot(comp.id),
             modelSpec = bot.model,
             maxTokens = 1200,
         )
@@ -386,9 +453,9 @@ class AutonomousEngine(
             return res.content
         }
         return if (res.isOffline) {
-            "No LLM API key configured yet. Open Settings (gear icon) and save an API key (OpenRouter, Gemini, Grok, OpenAI, or Anthropic) so I can execute this with live AI."
+            "No AI engine active yet. Open Settings (gear icon) to sign into Antigravity CLI with Google or save an LLM API key."
         } else {
-            "LLM error: ${res.error}"
+            "AI error: ${res.error}"
         }
     }
 
@@ -409,18 +476,18 @@ class AutonomousEngine(
         db.insertMission(missionId, comp.id, title, goal)
         db.updateBotStatus(ceoBot.id, "working", "Delegating mission...")
 
-        // Step 1: Strategist / Scoping (if available and LLM key present)
+        // Step 1: Strategist / Scoping (if available and AI engine active)
         var scopedSpec = goal
-        if (strategistBot != null && llm.hasAnyKey()) {
+        if (strategistBot != null && hasActiveEngine()) {
             onStatusUpdate("${strategistBot.name} is scoping...")
             db.updateBotStatus(strategistBot.id, "working", "Writing spec...")
-            val specRes = llm.complete(
-                messages = listOf(
-                    "system" to "You are ${strategistBot.name} (${strategistBot.role}) at '${comp.name}'. Produce a sharp structured outline & quality criteria for the deliverable.",
-                    "user" to "Company: ${comp.description}\nMission: $goal",
-                ),
+            val specRes = runAiCompletion(
+                systemPrompt = "You are ${strategistBot.name} (${strategistBot.role}) at '${comp.name}'. Produce a sharp structured outline & quality criteria for the deliverable.",
+                userPrompt = "Company: ${comp.description}\nMission: $goal",
+                sandboxDir = sandbox.companyRoot(comp.id),
                 modelSpec = strategistBot.model,
                 maxTokens = 1000,
+                onStatus = onStatusUpdate,
             )
             if (specRes.ok) {
                 scopedSpec = specRes.content
@@ -510,8 +577,8 @@ class AutonomousEngine(
                 comp.id,
                 "bot",
                 botName = "CEO",
-                content = if (llm.hasAnyKey()) "${primaryArt?.title ?: title} is ready. Shipping it needs your yes."
-                else "${primaryArt?.title ?: title} generated in local preview (add an LLM key in Settings for AI-authored content). Shipping needs your yes.",
+                content = if (hasActiveEngine()) "${primaryArt?.title ?: title} is ready. Shipping it needs your yes."
+                else "${primaryArt?.title ?: title} generated in local preview (connect Google in Antigravity CLI or add an LLM key in Settings for AI-authored content). Shipping needs your yes.",
                 cardType = "approval",
             ),
             rawPayloadJson = JSONObject().put("id", aprId).toString(),
@@ -530,61 +597,117 @@ class AutonomousEngine(
         spec: String,
     ): List<ArtifactItem> {
         val created = mutableListOf<ArtifactItem>()
-        if (!llm.hasAnyKey()) {
+        if (!hasActiveEngine()) {
             created.add(buildFallbackPdfArtifact(comp, bot, title, goal, spec))
             return created
         }
 
-        val sysPrompt = """
-            You are ${bot.name} (${bot.role}) at company '${comp.name}'.
-            Company mission: ${comp.description}
-            Your instructions: ${bot.systemPrompt}
+        val compRoot = sandbox.companyRoot(comp.id)
+        val existingOutNames = sandbox.listOutputFiles(comp.id).map { it.name }.toSet()
 
-            You work inside an isolated Android sandbox. You MUST reply strictly with ONE JSON object:
-            Option 1 (call a tool):
-            {"action": "tool", "tool": "create_pdf", "args": {"filename": "slug.pdf", "title": "...", "subtitle": "...", "sections": [{"heading": "...", "body": "..."}]}}
-            Other tools:
-            - "write_file": {"rel_path": "output/file.md", "content": "..."}
-            - "create_zip": {"zip_filename": "bundle.zip", "rel_paths": ["output/file1.pdf", "output/file2.md"]}
-            - "web_fetch": {"url": "https://..."}
-            Option 2 (finish after files are created):
-            {"action": "final", "summary": "...", "primary_rel_path": "output/slug.pdf"}
+        if (canUseAgyEngine()) {
+            // Antigravity CLI natively executes multi-step reasoning + file tools inside compRoot
+            val agyRes = runAiCompletion(
+                systemPrompt = """
+                    You are ${bot.name} (${bot.role}) at company '${comp.name}'.
+                    Company mission: ${comp.description}
+                    Your instructions: ${bot.systemPrompt}
 
-            Make sure the content inside create_pdf / write_file is genuinely thorough, rich, actionable, and publish-ready — never shallow placeholders.
-        """.trimIndent()
+                    Work inside this sandbox directory (${compRoot.absolutePath}).
+                    Create high-quality deliverable files inside output/ (e.g. output/${slugify(title)}.md or .html or .csv or scripts) AND/OR return a single JSON object:
+                    {"action": "tool", "tool": "create_pdf", "args": {"filename": "${slugify(title)}.pdf", "title": "...", "subtitle": "...", "sections": [{"heading": "...", "body": "..."}]}}
+                    If you already wrote deliverable files directly into output/, respond with:
+                    {"title": "...", "subtitle": "...", "sections": [{"heading": "...", "body": "..."}]} so we also generate a crisp PDF companion.
+                """.trimIndent(),
+                userPrompt = "Mission: $title\nGoal: $goal\nSpec:\n$spec",
+                sandboxDir = compRoot,
+                modelSpec = bot.model,
+                maxTokens = 3200,
+            )
+            if (agyRes.ok) {
+                db.addTokensUsed(comp.id, agyRes.tokensUsed)
+                // 1) Pick up any new real files Antigravity CLI wrote directly into output/
+                val newFiles = sandbox.listOutputFiles(comp.id).filter { it.name !in existingOutNames }
+                for (f in newFiles) {
+                    created.add(registerArtifact(comp.id, bot.name, f.nameWithoutExtension, f, "Generated in sandbox via Antigravity CLI"))
+                }
+                // 2) Check if Antigravity CLI returned JSON tool / sections to compile a PDF
+                val parsed = llm.extractJsonObject(agyRes.content)
+                if (parsed != null) {
+                    if (parsed.optString("tool") == "create_pdf") {
+                        val args = parsed.optJSONObject("args") ?: JSONObject()
+                        executeSandboxTool(comp, bot, "create_pdf", args).second?.let { created.add(it) }
+                    } else if (parsed.has("sections")) {
+                        executeSandboxTool(comp, bot, "create_pdf", parsed.put("filename", "${slugify(title)}.pdf")).second?.let { created.add(it) }
+                    }
+                } else if (created.isEmpty() && agyRes.content.length > 80) {
+                    // Turn Antigravity CLI markdown/text response into a structured PDF artifact
+                    val file = sandbox.createPdf(
+                        companyId = comp.id,
+                        filename = "${slugify(title)}.pdf",
+                        title = title,
+                        subtitle = "${comp.name} · Generated via Antigravity CLI (${bot.name})",
+                        sections = listOf(
+                            "Deliverable" to agyRes.content.take(12000),
+                        ),
+                    )
+                    created.add(registerArtifact(comp.id, bot.name, title, file, "PDF generated via Antigravity CLI"))
+                }
+            }
+        }
 
-        val history = mutableListOf(
-            "system" to sysPrompt,
-            "user" to "Mission: $title\nGoal: $goal\nSpec:\n$spec",
-        )
+        if (created.isEmpty() && llm.hasAnyKey()) {
+            val sysPrompt = """
+                You are ${bot.name} (${bot.role}) at company '${comp.name}'.
+                Company mission: ${comp.description}
+                Your instructions: ${bot.systemPrompt}
 
-        for (step in 1..4) {
-            if (killSwitch) break
-            val res = llm.complete(history, modelSpec = bot.model, jsonMode = true, maxTokens = 3200)
-            if (!res.ok) break
-            db.addTokensUsed(comp.id, res.tokensUsed)
-            val parsed = llm.extractJsonObject(res.content) ?: break
-            val action = parsed.optString("action", "final").lowercase()
-            if (action == "tool") {
-                val tool = parsed.optString("tool")
-                val args = parsed.optJSONObject("args") ?: JSONObject()
-                val toolRes = executeSandboxTool(comp, bot, tool, args)
-                val art = toolRes.second
-                if (art != null) created.add(art)
-                history.add("assistant" to parsed.toString())
-                history.add("user" to "Tool '$tool' result: ${toolRes.first}")
-            } else {
-                break
+                You work inside an isolated Android sandbox. You MUST reply strictly with ONE JSON object:
+                Option 1 (call a tool):
+                {"action": "tool", "tool": "create_pdf", "args": {"filename": "slug.pdf", "title": "...", "subtitle": "...", "sections": [{"heading": "...", "body": "..."}]}}
+                Other tools:
+                - "list_files": {}
+                - "read_file": {"rel_path": "workspace/uploads/file.txt"}
+                - "write_file": {"rel_path": "output/file.md", "content": "..."}
+                - "create_zip": {"zip_filename": "bundle.zip", "rel_paths": ["output/file1.pdf", "output/file2.md"]}
+                - "web_fetch": {"url": "https://..."}
+                Option 2 (finish after files are created):
+                {"action": "final", "summary": "...", "primary_rel_path": "output/slug.pdf"}
+
+                Make sure the content inside create_pdf / write_file is genuinely thorough, rich, actionable, and publish-ready — never shallow placeholders.
+            """.trimIndent()
+
+            val history = mutableListOf(
+                "system" to sysPrompt,
+                "user" to "Mission: $title\nGoal: $goal\nSpec:\n$spec",
+            )
+
+            for (step in 1..4) {
+                if (killSwitch) break
+                val res = llm.complete(history, modelSpec = bot.model, jsonMode = true, maxTokens = 3200)
+                if (!res.ok) break
+                db.addTokensUsed(comp.id, res.tokensUsed)
+                val parsed = llm.extractJsonObject(res.content) ?: break
+                val action = parsed.optString("action", "final").lowercase()
+                if (action == "tool") {
+                    val tool = parsed.optString("tool")
+                    val args = parsed.optJSONObject("args") ?: JSONObject()
+                    val toolRes = executeSandboxTool(comp, bot, tool, args)
+                    val art = toolRes.second
+                    if (art != null) created.add(art)
+                    history.add("assistant" to parsed.toString())
+                    history.add("user" to "Tool '$tool' result: ${toolRes.first}")
+                } else {
+                    break
+                }
             }
         }
 
         if (created.isEmpty()) {
-            // Ask LLM once directly for rich PDF sections and compile natively
-            val secRes = llm.complete(
-                messages = listOf(
-                    "system" to "Write high-quality deliverable content as JSON: {\"title\": \"...\", \"subtitle\": \"...\", \"sections\": [{\"heading\": \"...\", \"body\": \"...\"}]} (at least 4 detailed sections).",
-                    "user" to "Company: ${comp.name}\nGoal: $goal",
-                ),
+            val secRes = runAiCompletion(
+                systemPrompt = "Write high-quality deliverable content as JSON: {\"title\": \"...\", \"subtitle\": \"...\", \"sections\": [{\"heading\": \"...\", \"body\": \"...\"}]} (at least 4 detailed sections).",
+                userPrompt = "Company: ${comp.name}\nGoal: $goal",
+                sandboxDir = compRoot,
                 modelSpec = bot.model,
                 jsonMode = true,
                 maxTokens = 3000,
@@ -626,6 +749,15 @@ class AutonomousEngine(
                 val file = sandbox.createPdf(comp.id, fn, docTitle, sub, sections)
                 val art = registerArtifact(comp.id, bot.name, docTitle, file, "PDF deliverable (${sections.size} sections)")
                 JSONObject().put("ok", true).put("rel_path", art.relPath).put("bytes", art.sizeBytes).toString() to art
+            }
+            "list_files" -> {
+                val files = sandbox.listFiles(comp.id).joinToString("\n") { "${it.first} (${it.second} bytes)" }
+                JSONObject().put("ok", true).put("files", files).toString() to null
+            }
+            "read_file" -> {
+                val rel = args.optString("rel_path")
+                val content = runCatching { sandbox.readTextFile(comp.id, rel) }.getOrElse { it.message ?: "Read error" }
+                JSONObject().put("ok", true).put("content", content).toString() to null
             }
             "write_file" -> {
                 val rel = args.optString("rel_path").ifBlank { "output/deliverable.md" }
@@ -710,14 +842,13 @@ class AutonomousEngine(
     ): Triple<Boolean, Int, String> {
         if (artifact == null) return Triple(false, 30, "No deliverable produced in sandbox")
         val prog = sandbox.verifyArtifactProgrammatically(comp.id, artifact.relPath)
-        if (!prog.passed || !llm.hasAnyKey()) {
+        if (!prog.passed || !hasActiveEngine()) {
             return Triple(prog.passed, prog.score, prog.report)
         }
-        val res = llm.complete(
-            messages = listOf(
-                "system" to "You are ${qaBot.name} (${qaBot.role}). Audit the deliverable and reply ONLY as JSON: {\"passed\": true, \"score\": 92, \"report\": \"short verdict\"}.",
-                "user" to "Goal: $goal\nFile: ${artifact.filename} (${artifact.sizeBytes} bytes)\nProgrammatic check: ${prog.report}",
-            ),
+        val res = runAiCompletion(
+            systemPrompt = "You are ${qaBot.name} (${qaBot.role}). Audit the deliverable and reply ONLY as JSON: {\"passed\": true, \"score\": 92, \"report\": \"short verdict\"}.",
+            userPrompt = "Goal: $goal\nFile: ${artifact.filename} (${artifact.sizeBytes} bytes)\nProgrammatic check: ${prog.report}",
+            sandboxDir = sandbox.companyRoot(comp.id),
             modelSpec = qaBot.model,
             jsonMode = true,
             maxTokens = 400,

@@ -6,10 +6,13 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.os.Build
 import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.animateContentSize
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -20,6 +23,7 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
@@ -29,6 +33,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
@@ -36,10 +41,13 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.ArrowUpward
 import androidx.compose.material.icons.rounded.Assessment
+import androidx.compose.material.icons.rounded.AttachFile
 import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.ChevronLeft
 import androidx.compose.material.icons.rounded.ChevronRight
+import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.FolderOpen
+import androidx.compose.material.icons.rounded.Public
 import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -66,7 +74,12 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.foundryos.app.data.AgyAuthState
+import com.foundryos.app.data.AgyCliStatus
+import com.foundryos.app.data.AgyModelInfo
+import com.foundryos.app.data.AgyQuotaGroup
 import com.foundryos.app.data.ArtifactItem
+import com.foundryos.app.data.AttachedLocalFile
 import com.foundryos.app.data.BotItem
 import com.foundryos.app.data.ChatMessageItem
 import com.foundryos.app.data.CompanyItem
@@ -81,6 +94,7 @@ import com.foundryos.app.ui.components.BotMascot
 import com.foundryos.app.ui.components.CompanyOrgCard
 import com.foundryos.app.ui.components.ReleaseApprovalCard
 import com.foundryos.app.ui.theme.FoundryColors
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 /**
@@ -105,20 +119,46 @@ fun FoundryMainScreen(repo: FoundryRepository) {
 
     var sidebarExpanded by remember { mutableStateOf(false) }
     var inputText by remember { mutableStateOf("") }
+    var pendingAttachments by remember { mutableStateOf<List<AttachedLocalFile>>(emptyList()) }
     var isBusy by remember { mutableStateOf(false) }
     var busyLabel by remember { mutableStateOf("") }
+
+    val filePickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenMultipleDocuments(),
+    ) { uris ->
+        if (uris.isNotEmpty()) {
+            val picked = uris.mapNotNull { repo.inspectLocalUri(it) }
+            if (picked.isNotEmpty()) {
+                pendingAttachments = (pendingAttachments + picked).distinctBy { it.uriString }
+            }
+        }
+    }
 
     var showCreateDialog by remember { mutableStateOf(false) }
     var proposal by remember { mutableStateOf<CompanyProposalData?>(null) }
     var showArtifactsDialog by remember { mutableStateOf(false) }
     var showSettingsDialog by remember { mutableStateOf(false) }
+    var showBrowserDialog by remember { mutableStateOf(false) }
+    var browserUrl by remember { mutableStateOf("https://www.google.com") }
+    var browserIsOAuth by remember { mutableStateOf(false) }
+
+    var agyCliStatus by remember { mutableStateOf(AgyCliStatus()) }
+    var agyAuthState by remember { mutableStateOf(AgyAuthState()) }
+    var agyPreferEngine by remember { mutableStateOf(repo.isAgyPreferEnabled()) }
+    var agySelectedModel by remember { mutableStateOf(repo.getAgySelectedModel()) }
+    var agyModels by remember { mutableStateOf<List<AgyModelInfo>>(emptyList()) }
+    var agyQuotaGroups by remember { mutableStateOf<List<AgyQuotaGroup>>(emptyList()) }
+    var agyBusyLabel by remember { mutableStateOf<String?>(null) }
+    var agyInstallProgress by remember { mutableStateOf<Float?>(null) }
 
     var hasAnyKey by remember { mutableStateOf(false) }
     var engineSummary by remember { mutableStateOf("On-Device Engine") }
     var providers by remember { mutableStateOf<List<ProviderStatus>>(emptyList()) }
     var killSwitch by remember { mutableStateOf(repo.killSwitch) }
-    var isTestingKey by remember { mutableStateOf(false) }
-    var keyTestResult by remember { mutableStateOf<String?>(null) }
+    var isFetchingModels by remember { mutableStateOf(false) }
+    var isTestingModel by remember { mutableStateOf(false) }
+    var settingsMessage by remember { mutableStateOf<String?>(null) }
+    var settingsSuccess by remember { mutableStateOf(false) }
 
     val listState = rememberLazyListState()
 
@@ -153,8 +193,40 @@ fun FoundryMainScreen(repo: FoundryRepository) {
         }
     }
 
+    suspend fun refreshAgyState(fetchQuotas: Boolean = false) {
+        agyCliStatus = repo.getAgyCliStatus()
+        agyPreferEngine = repo.isAgyPreferEnabled()
+        agySelectedModel = repo.getAgySelectedModel()
+        if (agyCliStatus.installed) {
+            agyAuthState = repo.getAgyAuthState()
+            if (fetchQuotas || (agyAuthState.signedIn && agyModels.isEmpty())) {
+                val (m, q) = repo.fetchAgyModelsAndQuotas()
+                agyModels = m
+                agyQuotaGroups = q
+            }
+        }
+        refreshAll(activeCompanyId)
+    }
+
     LaunchedEffect(Unit) {
         refreshAll()
+        refreshAgyState(fetchQuotas = true)
+    }
+
+    // Open Google OAuth sign-in URLs inside the in-app WebView browser automatically
+    LaunchedEffect(repo) {
+        repo.agyLoginUrlEvents().collect { url ->
+            browserUrl = url
+            browserIsOAuth = true
+            showBrowserDialog = true
+        }
+    }
+
+    // Refresh UI when Antigravity runtime emits state updates (account swap / completion / login)
+    LaunchedEffect(repo) {
+        repo.agyStateTick().collect {
+            refreshAll(activeCompanyId)
+        }
     }
 
     // Listen to instant UI refresh when user clicks "Ship" / "Not yet" in Android notification shade
@@ -473,6 +545,21 @@ fun FoundryMainScreen(repo: FoundryRepository) {
                         }
                     }
                     IconButton(
+                        onClick = {
+                            browserUrl = "https://www.google.com"
+                            browserIsOAuth = false
+                            showBrowserDialog = true
+                        },
+                        modifier = Modifier.size(34.dp),
+                    ) {
+                        Icon(
+                            Icons.Rounded.Public,
+                            contentDescription = "In-App Browser",
+                            tint = FoundryColors.InkSecondary,
+                            modifier = Modifier.size(19.dp),
+                        )
+                    }
+                    IconButton(
                         onClick = { showSettingsDialog = true },
                         modifier = Modifier.size(34.dp),
                     ) {
@@ -505,28 +592,36 @@ fun FoundryMainScreen(repo: FoundryRepository) {
                         color = FoundryColors.InkSecondary,
                     )
                     Spacer(Modifier.height(18.dp))
-                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Row(
+                        modifier = Modifier.horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
                         Box(
                             modifier = Modifier
+                                .heightIn(min = 44.dp)
                                 .clip(RoundedCornerShape(999.dp))
                                 .background(FoundryColors.InkPrimary)
                                 .clickable {
                                     proposal = null
                                     showCreateDialog = true
                                 }
-                                .padding(horizontal = 18.dp, vertical = 12.dp),
+                                .padding(horizontal = 18.dp, vertical = 11.dp),
+                            contentAlignment = Alignment.Center,
                         ) {
-                            Text("Create a company", color = Color.White, fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+                            Text("Create a company", color = Color.White, fontWeight = FontWeight.SemiBold, fontSize = 13.5.sp, maxLines = 1, softWrap = false)
                         }
                         if (!hasAnyKey) {
                             Box(
                                 modifier = Modifier
+                                    .heightIn(min = 44.dp)
                                     .clip(RoundedCornerShape(999.dp))
                                     .background(FoundryColors.SoftSurface)
                                     .clickable { showSettingsDialog = true }
-                                    .padding(horizontal = 16.dp, vertical = 12.dp),
+                                    .padding(horizontal = 16.dp, vertical = 11.dp),
+                                contentAlignment = Alignment.Center,
                             ) {
-                                Text("Add LLM Key", color = FoundryColors.InkPrimary, fontWeight = FontWeight.Medium, fontSize = 14.sp)
+                                Text("Connect AI", color = FoundryColors.InkPrimary, fontWeight = FontWeight.Medium, fontSize = 13.5.sp, maxLines = 1, softWrap = false)
                             }
                         }
                     }
@@ -591,12 +686,61 @@ fun FoundryMainScreen(repo: FoundryRepository) {
                 }
             }
 
-            // Bottom Floating Pill Composer
-            Box(
+            // Bottom Floating Pill Composer (+ attaches local device files!)
+            Column(
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(horizontal = 12.dp, vertical = 10.dp),
             ) {
+                if (pendingAttachments.isNotEmpty()) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState())
+                            .padding(bottom = 8.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        pendingAttachments.forEach { file ->
+                            Row(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(999.dp))
+                                    .background(FoundryColors.SidebarBg)
+                                    .border(1.dp, FoundryColors.Border, RoundedCornerShape(999.dp))
+                                    .padding(horizontal = 10.dp, vertical = 6.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Rounded.AttachFile,
+                                    contentDescription = null,
+                                    tint = FoundryColors.InkSecondary,
+                                    modifier = Modifier.size(14.dp),
+                                )
+                                Spacer(Modifier.width(4.dp))
+                                Text(
+                                    text = file.name,
+                                    fontSize = 11.5.sp,
+                                    fontWeight = FontWeight.Medium,
+                                    color = FoundryColors.InkPrimary,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                                Spacer(Modifier.width(6.dp))
+                                Icon(
+                                    imageVector = Icons.Rounded.Close,
+                                    contentDescription = "Remove file",
+                                    tint = FoundryColors.InkSecondary,
+                                    modifier = Modifier
+                                        .size(14.dp)
+                                        .clickable {
+                                            pendingAttachments = pendingAttachments.filterNot { it.uriString == file.uriString }
+                                        },
+                                )
+                            }
+                        }
+                    }
+                }
+
+                val canSend = (inputText.isNotBlank() || pendingAttachments.isNotEmpty()) && !isBusy
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -611,13 +755,10 @@ fun FoundryMainScreen(repo: FoundryRepository) {
                             .size(34.dp)
                             .clip(CircleShape)
                             .background(FoundryColors.SidebarBg)
-                            .clickable {
-                                proposal = null
-                                showCreateDialog = true
-                            },
+                            .clickable { filePickerLauncher.launch(arrayOf("*/*")) },
                         contentAlignment = Alignment.Center,
                     ) {
-                        Icon(Icons.Rounded.Add, contentDescription = "New company", tint = FoundryColors.InkPrimary, modifier = Modifier.size(18.dp))
+                        Icon(Icons.Rounded.Add, contentDescription = "Attach local file", tint = FoundryColors.InkPrimary, modifier = Modifier.size(18.dp))
                     }
 
                     Spacer(Modifier.width(10.dp))
@@ -646,16 +787,33 @@ fun FoundryMainScreen(repo: FoundryRepository) {
                         modifier = Modifier
                             .size(34.dp)
                             .clip(CircleShape)
-                            .background(if (inputText.isNotBlank() && !isBusy) FoundryColors.InkPrimary else FoundryColors.SoftSurface)
-                            .clickable(enabled = inputText.isNotBlank() && !isBusy) {
+                            .background(if (canSend) FoundryColors.InkPrimary else FoundryColors.SoftSurface)
+                            .clickable(enabled = canSend) {
                                 val text = inputText.trim()
+                                val filesToSend = pendingAttachments
                                 inputText = ""
+                                pendingAttachments = emptyList()
                                 scope.launch {
                                     isBusy = true
                                     if (activeCompany == null) {
+                                        val desc = text.ifBlank {
+                                            "Company working with ${filesToSend.joinToString(", ") { it.name }}"
+                                        }
                                         busyLabel = "CEO is hiring your company..."
-                                        val prop = repo.proposeCompany(text)
-                                        val created = repo.deployCompany(text, prop)
+                                        val prop = repo.proposeCompany(desc)
+                                        val created = repo.deployCompany(desc, prop)
+                                        if (filesToSend.isNotEmpty()) {
+                                            busyLabel = "Importing local files into sandbox..."
+                                            repo.sendFounderMessage(
+                                                companyId = created.id,
+                                                text = text.ifBlank { "Inspect and process the attached local files." },
+                                                attachments = filesToSend,
+                                                onStatusUpdate = { status ->
+                                                    busyLabel = status
+                                                    refreshAll(created.id)
+                                                },
+                                            )
+                                        }
                                         refreshAll(created.id)
                                     } else {
                                         busyLabel = "${headerBot?.name ?: "CEO"} is working in sandbox..."
@@ -663,6 +821,7 @@ fun FoundryMainScreen(repo: FoundryRepository) {
                                         repo.sendFounderMessage(
                                             companyId = activeCompany.id,
                                             text = text,
+                                            attachments = filesToSend,
                                             targetBotId = targetId,
                                             onStatusUpdate = { status ->
                                                 busyLabel = status
@@ -679,7 +838,7 @@ fun FoundryMainScreen(repo: FoundryRepository) {
                         Icon(
                             imageVector = Icons.Rounded.ArrowUpward,
                             contentDescription = "Send",
-                            tint = if (inputText.isNotBlank() && !isBusy) Color.White else FoundryColors.InkMuted,
+                            tint = if (canSend) Color.White else FoundryColors.InkMuted,
                             modifier = Modifier.size(18.dp),
                         )
                     }
@@ -730,19 +889,136 @@ fun FoundryMainScreen(repo: FoundryRepository) {
         SettingsDialog(
             engineSummary = engineSummary,
             hasAnyKey = hasAnyKey,
+            agyCliStatus = agyCliStatus,
+            agyAuthState = agyAuthState,
+            agyPreferEngine = agyPreferEngine,
+            agySelectedModel = agySelectedModel,
+            agyModels = agyModels,
+            agyQuotaGroups = agyQuotaGroups,
+            agyBusyLabel = agyBusyLabel,
+            agyInstallProgress = agyInstallProgress,
             providers = providers,
             connectors = connectors,
             killSwitch = killSwitch,
-            isTestingKey = isTestingKey,
-            testResult = keyTestResult,
-            onSaveAndTestProvider = { prov, key, mod ->
+            isFetchingModels = isFetchingModels,
+            isTestingModel = isTestingModel,
+            statusMessage = settingsMessage,
+            statusIsSuccess = settingsSuccess,
+            getSavedKey = { prov -> repo.getProviderKey(prov) },
+            getCachedModels = { prov -> repo.getCachedModels(prov) },
+            onTogglePreferAgy = { enabled ->
+                repo.setAgyPreferEnabled(enabled)
+                agyPreferEngine = enabled
+                refreshAll(activeCompanyId)
+            },
+            onInstallOrUpdateAgy = {
                 scope.launch {
-                    isTestingKey = true
-                    keyTestResult = null
-                    repo.saveProviderKey(prov, key, mod)
-                    val (ok, msg) = repo.testProviderKey(prov)
-                    keyTestResult = if (ok) msg else "Saved locally, check failed: $msg"
-                    isTestingKey = false
+                    agyBusyLabel = "Preparing Antigravity CLI download..."
+                    agyInstallProgress = 0f
+                    val (ok, msg) = repo.installOrUpdateAgy { p ->
+                        agyBusyLabel = p.message
+                        agyInstallProgress = if (p.totalBytes > 0L) p.fraction else null
+                    }
+                    agyInstallProgress = null
+                    agyBusyLabel = if (ok) "Starting Antigravity Hub..." else null
+                    if (ok) {
+                        repo.ensureAgyHubStarted()
+                    }
+                    agyBusyLabel = null
+                    Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
+                    refreshAgyState(fetchQuotas = ok)
+                }
+            },
+            onAgyLogin = {
+                scope.launch {
+                    agyBusyLabel = "Launching Google OAuth sign-in..."
+                    val (ok, msg) = repo.startAgyGoogleLogin {
+                        refreshAgyState(fetchQuotas = true)
+                    }
+                    agyBusyLabel = null
+                    if (!ok) {
+                        Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
+                    }
+                    refreshAgyState(fetchQuotas = ok)
+                }
+            },
+            onAgyAddAnotherAccount = {
+                scope.launch {
+                    agyBusyLabel = "Saving current Google account & opening new OAuth..."
+                    val (ok, msg) = repo.addAnotherAgyAccount {
+                        refreshAgyState(fetchQuotas = true)
+                    }
+                    agyBusyLabel = null
+                    if (!ok) {
+                        Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
+                    }
+                    refreshAgyState(fetchQuotas = ok)
+                }
+            },
+            onAgySwitchAccount = { email ->
+                scope.launch {
+                    agyBusyLabel = "Switching to $email..."
+                    val (_, msg) = repo.switchAgyAccount(email)
+                    Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
+                    refreshAgyState(fetchQuotas = true)
+                    agyBusyLabel = null
+                }
+            },
+            onAgySaveAccount = {
+                val (_, msg) = repo.saveCurrentAgyAccount(agyAuthState.activeEmail)
+                Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
+                scope.launch { refreshAgyState(fetchQuotas = false) }
+            },
+            onAgyDeleteAccount = { email ->
+                repo.deleteAgyAccount(email)
+                Toast.makeText(context, "Removed saved account $email", Toast.LENGTH_SHORT).show()
+                scope.launch { refreshAgyState(fetchQuotas = false) }
+            },
+            onRefreshAgyQuotas = {
+                scope.launch {
+                    agyBusyLabel = "Fetching models & Google account quotas..."
+                    refreshAgyState(fetchQuotas = true)
+                    agyBusyLabel = null
+                }
+            },
+            onSelectAgyModel = { modelId ->
+                repo.setAgySelectedModel(modelId)
+                agySelectedModel = modelId
+                refreshAll(activeCompanyId)
+                Toast.makeText(context, "Antigravity model set to $modelId", Toast.LENGTH_SHORT).show()
+            },
+            onAddCustomProvider = { name, baseUrl, protocol ->
+                val slug = repo.addCustomProvider(name, baseUrl, protocol)
+                settingsSuccess = true
+                settingsMessage = "Provider '$slug' added — now enter your API key & load models."
+                refreshAll(activeCompanyId)
+                slug
+            },
+            onDeleteCustomProvider = { prov ->
+                repo.deleteCustomProvider(prov)
+                settingsMessage = "Removed provider '$prov'."
+                settingsSuccess = true
+                refreshAll(activeCompanyId)
+            },
+            onFetchModels = { prov, key ->
+                scope.launch {
+                    isFetchingModels = true
+                    settingsMessage = null
+                    val res = repo.fetchAvailableModels(prov, key)
+                    settingsSuccess = res.ok
+                    settingsMessage = res.message
+                    isFetchingModels = false
+                    refreshAll(activeCompanyId)
+                }
+            },
+            onSelectAndTestModel = { prov, modelId ->
+                scope.launch {
+                    isTestingModel = true
+                    settingsMessage = null
+                    val (ok, msg) = repo.saveAndTestModel(prov, modelId)
+                    settingsSuccess = ok
+                    settingsMessage = msg
+                    isTestingModel = false
                     refreshAll(activeCompanyId)
                 }
             },
@@ -757,8 +1033,27 @@ fun FoundryMainScreen(repo: FoundryRepository) {
                 killSwitch = active
             },
             onDismiss = {
-                keyTestResult = null
+                settingsMessage = null
                 showSettingsDialog = false
+            },
+        )
+    }
+
+    if (showBrowserDialog) {
+        InAppBrowserDialog(
+            initialUrl = browserUrl,
+            isOAuthSession = browserIsOAuth,
+            onOAuthLoopbackHit = {
+                scope.launch {
+                    delay(1200)
+                    refreshAgyState(fetchQuotas = true)
+                    Toast.makeText(context, "Google Sign-In completed!", Toast.LENGTH_SHORT).show()
+                    showBrowserDialog = false
+                }
+            },
+            onDismiss = {
+                showBrowserDialog = false
+                scope.launch { refreshAgyState(fetchQuotas = browserIsOAuth) }
             },
         )
     }

@@ -116,4 +116,71 @@ data class ProviderStatus(
     val configured: Boolean,
     val model: String,
     val baseUrl: String = "",
+    val isCustom: Boolean = false,
+    val protocol: String = "openai",
+)
+
+data class RemoteModelInfo(
+    val id: String,
+    val name: String,
+    val isFree: Boolean = false,
+)
+
+data class AttachedLocalFile(
+    val uriString: String,
+    val name: String,
+    val sizeBytes: Long,
+    val mimeType: String,
+    val textSnippet: String? = null,
+)
+
+data class AgyCliStatus(
+    val supportedAbi: Boolean = true,
+    val installed: Boolean = false,
+    val version: String = "",
+    val binaryPath: String = "",
+    val hubStatus: String = "stopped", // stopped | starting | online | error
+    val lastError: String = "",
+)
+
+data class AgySavedAccount(
+    val name: String,
+    val email: String,
+    val authMethod: String,
+    val savedAt: Long,
+    val usedAt: Long,
+    val active: Boolean,
+)
+
+data class AgyAuthState(
+    val signedIn: Boolean = false,
+    val email: String = "",
+    val fullName: String = "",
+    val planName: String = "",
+    val userTier: String = "",
+    val currentSaved: Boolean = false,
+    val accounts: List<AgySavedAccount> = emptyList(),
+)
+
+data class AgyQuotaBucket(
+    val window: String,
+    val displayName: String,
+    val remainingFraction: Float,
+    val remainingPct: String,
+    val countdown: String,
+)
+
+data class AgyQuotaGroup(
+    val groupName: String,
+    val fiveHour: AgyQuotaBucket? = null,
+    val weekly: AgyQuotaBucket? = null,
+)
+
+data class AgyModelInfo(
+    val id: String,
+    val key: String,
+    val displayName: String,
+    val supportsThinking: Boolean = false,
+    val remainingFraction: Float? = null,
+    val resetCountdown: String = "",
 )

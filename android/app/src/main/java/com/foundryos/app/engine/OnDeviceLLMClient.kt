@@ -2,6 +2,7 @@ package com.foundryos.app.engine
 
 import android.content.Context
 import com.foundryos.app.data.ProviderStatus
+import com.foundryos.app.data.RemoteModelInfo
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
@@ -22,6 +23,18 @@ data class LLMCallResult(
     val isOffline: Boolean = false,
 )
 
+data class ModelFetchResult(
+    val ok: Boolean,
+    val models: List<RemoteModelInfo> = emptyList(),
+    val message: String = "",
+)
+
+data class CustomProviderDef(
+    val id: String,
+    val baseUrl: String,
+    val protocol: String = "openai", // "openai" | "anthropic"
+)
+
 class OnDeviceLLMClient(context: Context) {
     private val prefs = context.getSharedPreferences("ceo_llm_keys", Context.MODE_PRIVATE)
     private val jsonMedia = "application/json; charset=utf-8".toMediaType()
@@ -32,17 +45,7 @@ class OnDeviceLLMClient(context: Context) {
         .build()
 
     companion object {
-        val SUPPORTED_PROVIDERS = listOf("openrouter", "gemini", "xai", "openai", "anthropic", "deepseek", "groq")
-
-        val DEFAULT_MODELS = mapOf(
-            "openrouter" to "anthropic/claude-3.5-sonnet",
-            "gemini" to "gemini-2.5-flash",
-            "xai" to "grok-3-mini",
-            "openai" to "gpt-4o-mini",
-            "anthropic" to "claude-3-5-sonnet-latest",
-            "deepseek" to "deepseek-chat",
-            "groq" to "llama-3.3-70b-versatile",
-        )
+        val BUILTIN_PROVIDERS = listOf("openrouter", "gemini", "xai", "openai", "anthropic", "deepseek", "groq")
 
         val ENDPOINTS = mapOf(
             "openrouter" to "https://openrouter.ai/api/v1/chat/completions",
@@ -53,59 +56,309 @@ class OnDeviceLLMClient(context: Context) {
             "deepseek" to "https://api.deepseek.com/v1/chat/completions",
             "groq" to "https://api.groq.com/openai/v1/chat/completions",
         )
+
+        val MODELS_ENDPOINTS = mapOf(
+            "openrouter" to "https://openrouter.ai/api/v1/models",
+            "gemini" to "https://generativelanguage.googleapis.com/v1beta/openai/models",
+            "xai" to "https://api.x.ai/v1/models",
+            "openai" to "https://api.openai.com/v1/models",
+            "anthropic" to "https://api.anthropic.com/v1/models",
+            "deepseek" to "https://api.deepseek.com/models",
+            "groq" to "https://api.groq.com/openai/v1/models",
+        )
     }
 
-    fun saveProviderKey(provider: String, apiKey: String, model: String, customUrl: String = "") {
-        val p = provider.lowercase().trim()
-        prefs.edit()
-            .putString("key_$p", apiKey.trim())
-            .putString("model_$p", model.trim().ifBlank { DEFAULT_MODELS[p] ?: "" })
-            .apply {
-                if (customUrl.isNotBlank()) putString("url_$p", customUrl.trim())
+    fun getCustomProviders(): List<CustomProviderDef> {
+        val raw = prefs.getString("custom_providers_list", null) ?: return emptyList()
+        return runCatching {
+            val arr = JSONArray(raw)
+            (0 until arr.length()).mapNotNull { i ->
+                val o = arr.optJSONObject(i) ?: return@mapNotNull null
+                val id = o.optString("id").trim().lowercase()
+                val baseUrl = o.optString("base_url").trim()
+                if (id.isBlank() || baseUrl.isBlank()) null
+                else CustomProviderDef(id, baseUrl, o.optString("protocol", "openai"))
             }
-            .apply()
+        }.getOrDefault(emptyList())
+    }
+
+    fun addCustomProvider(name: String, baseUrl: String, protocol: String = "openai"): String {
+        val slug = name.trim().lowercase().replace(Regex("[^a-z0-9_-]+"), "-").trim('-')
+            .ifBlank { "custom-${System.currentTimeMillis() % 10000}" }
+        val cleanUrl = baseUrl.trim().trimEnd('/')
+        val cleanProto = if (protocol.equals("anthropic", ignoreCase = true)) "anthropic" else "openai"
+        val current = getCustomProviders().filterNot { it.id == slug }.toMutableList()
+        current.add(CustomProviderDef(slug, cleanUrl, cleanProto))
+        saveCustomProviders(current)
+        return slug
+    }
+
+    fun deleteCustomProvider(providerId: String) {
+        val slug = providerId.trim().lowercase()
+        val updated = getCustomProviders().filterNot { it.id == slug }
+        saveCustomProviders(updated)
+        clearProviderKey(slug)
+    }
+
+    private fun saveCustomProviders(list: List<CustomProviderDef>) {
+        val arr = JSONArray()
+        for (item in list) {
+            arr.put(
+                JSONObject()
+                    .put("id", item.id)
+                    .put("base_url", item.baseUrl)
+                    .put("protocol", item.protocol)
+            )
+        }
+        prefs.edit().putString("custom_providers_list", arr.toString()).apply()
+    }
+
+    private fun allProviderIds(): List<String> = BUILTIN_PROVIDERS + getCustomProviders().map { it.id }
+
+    private fun findCustom(providerId: String): CustomProviderDef? =
+        getCustomProviders().firstOrNull { it.id == providerId.lowercase().trim() }
+
+    private fun resolveProtocol(providerId: String): String {
+        val p = providerId.lowercase().trim()
+        if (p == "anthropic") return "anthropic"
+        return findCustom(p)?.protocol ?: "openai"
+    }
+
+    private fun resolveChatUrl(providerId: String): String {
+        val p = providerId.lowercase().trim()
+        ENDPOINTS[p]?.let { return it }
+        val custom = findCustom(p) ?: return ""
+        val base = custom.baseUrl.trimEnd('/')
+        return when {
+            base.endsWith("/chat/completions") || base.endsWith("/messages") -> base
+            custom.protocol == "anthropic" -> "$base/messages"
+            else -> "$base/chat/completions"
+        }
+    }
+
+    private fun resolveModelsUrl(providerId: String): String {
+        val p = providerId.lowercase().trim()
+        MODELS_ENDPOINTS[p]?.let { return it }
+        val custom = findCustom(p) ?: return ""
+        val base = custom.baseUrl.trimEnd('/')
+        return when {
+            base.endsWith("/models") -> base
+            base.endsWith("/chat/completions") -> base.removeSuffix("/chat/completions") + "/models"
+            base.endsWith("/messages") -> base.removeSuffix("/messages") + "/models"
+            else -> "$base/models"
+        }
+    }
+
+    fun saveProviderKey(provider: String, apiKey: String) {
+        val p = provider.lowercase().trim()
+        prefs.edit().putString("key_$p", apiKey.trim()).apply()
+    }
+
+    fun saveProviderModel(provider: String, model: String) {
+        val p = provider.lowercase().trim()
+        prefs.edit().putString("model_$p", model.trim()).apply()
     }
 
     fun clearProviderKey(provider: String) {
         val p = provider.lowercase().trim()
-        prefs.edit().remove("key_$p").apply()
+        prefs.edit().remove("key_$p").remove("model_$p").remove("models_cache_$p").apply()
     }
 
     fun getProviderKey(provider: String): String = prefs.getString("key_${provider.lowercase()}", "") ?: ""
 
-    fun getProviderModel(provider: String): String {
-        val p = provider.lowercase()
-        return prefs.getString("model_$p", DEFAULT_MODELS[p] ?: "") ?: (DEFAULT_MODELS[p] ?: "")
+    fun getProviderModel(provider: String): String = prefs.getString("model_${provider.lowercase()}", "") ?: ""
+
+    fun getCachedModels(provider: String): List<RemoteModelInfo> {
+        val raw = prefs.getString("models_cache_${provider.lowercase()}", null) ?: return emptyList()
+        return runCatching {
+            val arr = JSONArray(raw)
+            (0 until arr.length()).map {
+                val o = arr.getJSONObject(it)
+                RemoteModelInfo(
+                    id = o.optString("id"),
+                    name = o.optString("name", o.optString("id")),
+                    isFree = o.optBoolean("free", false),
+                )
+            }
+        }.getOrDefault(emptyList())
     }
 
-    fun getProviderStatuses(): List<ProviderStatus> = SUPPORTED_PROVIDERS.map { p ->
-        ProviderStatus(
-            name = p,
-            configured = getProviderKey(p).isNotBlank(),
-            model = getProviderModel(p),
-            baseUrl = prefs.getString("url_$p", ENDPOINTS[p] ?: "") ?: (ENDPOINTS[p] ?: ""),
-        )
+    private fun saveCachedModels(provider: String, models: List<RemoteModelInfo>) {
+        val arr = JSONArray()
+        for (m in models) {
+            arr.put(JSONObject().put("id", m.id).put("name", m.name).put("free", m.isFree))
+        }
+        prefs.edit().putString("models_cache_${provider.lowercase()}", arr.toString()).apply()
+    }
+
+    fun getProviderStatuses(): List<ProviderStatus> {
+        val builtIn = BUILTIN_PROVIDERS.map { p ->
+            ProviderStatus(
+                name = p,
+                configured = getProviderKey(p).isNotBlank() && getProviderModel(p).isNotBlank(),
+                model = getProviderModel(p),
+                baseUrl = ENDPOINTS[p] ?: "",
+                isCustom = false,
+                protocol = if (p == "anthropic") "anthropic" else "openai",
+            )
+        }
+        val custom = getCustomProviders().map { c ->
+            ProviderStatus(
+                name = c.id,
+                configured = getProviderModel(c.id).isNotBlank() && (getProviderKey(c.id).isNotBlank() || isLocalUrl(c.baseUrl)),
+                model = getProviderModel(c.id),
+                baseUrl = c.baseUrl,
+                isCustom = true,
+                protocol = c.protocol,
+            )
+        }
+        return builtIn + custom
+    }
+
+    private fun isLocalUrl(url: String): Boolean {
+        val l = url.lowercase()
+        return l.contains("127.0.0.1") || l.contains("localhost") || l.contains("192.168.") || l.contains("10.0.")
     }
 
     fun activeProviderSummary(): String {
-        val active = SUPPORTED_PROVIDERS.filter { getProviderKey(it).isNotBlank() }
-        return if (active.isEmpty()) {
-            "On-Device Engine · Add an LLM API key"
-        } else {
-            "On-Device Engine · ${active.joinToString(", ") { it.replaceFirstChar { c -> c.uppercase() } }} ✓"
+        val statuses = getProviderStatuses()
+        val active = statuses.filter { it.configured }.map { it.name }
+        val keyOnly = statuses.filter { !it.configured && getProviderKey(it.name).isNotBlank() }.map { it.name }
+        return when {
+            active.isNotEmpty() -> "On-Device Engine · ${active.joinToString(", ") { it.replaceFirstChar { c -> c.uppercase() } }} ✓"
+            keyOnly.isNotEmpty() -> "Key saved (${keyOnly.first()}) · Pick a model"
+            else -> "On-Device Engine · Add an LLM API key"
         }
     }
 
-    fun hasAnyKey(): Boolean = SUPPORTED_PROVIDERS.any { getProviderKey(it).isNotBlank() }
+    fun hasAnyKey(): Boolean = getProviderStatuses().any { it.configured }
 
-    suspend fun testProvider(provider: String): Pair<Boolean, String> {
+    /**
+     * Step 1: Query the provider's API first, verify credentials, and return the real available models.
+     */
+    suspend fun fetchAvailableModels(provider: String, apiKeyInput: String): ModelFetchResult = withContext(Dispatchers.IO) {
         val p = provider.lowercase().trim()
+        val custom = findCustom(p)
+        val key = apiKeyInput.trim().ifBlank { getProviderKey(p) }
+        if (key.isBlank() && (custom == null || !isLocalUrl(custom.baseUrl))) {
+            return@withContext ModelFetchResult(false, emptyList(), "Please paste your $p API key first.")
+        }
+
+        if (key.isNotBlank()) saveProviderKey(p, key)
+
+        try {
+            if (p == "openrouter") {
+                val authReq = Request.Builder()
+                    .url("https://openrouter.ai/api/v1/auth/key")
+                    .header("Authorization", "Bearer $key")
+                    .get()
+                    .build()
+                client.newCall(authReq).execute().use { authResp ->
+                    val authBody = authResp.body?.string() ?: ""
+                    if (!authResp.isSuccessful) {
+                        return@withContext ModelFetchResult(
+                            false,
+                            emptyList(),
+                            "OpenRouter key rejected (HTTP ${authResp.code}): ${authBody.take(180)}",
+                        )
+                    }
+                }
+            }
+
+            val modelsUrl = resolveModelsUrl(p)
+            if (modelsUrl.isBlank()) {
+                return@withContext ModelFetchResult(false, emptyList(), "Missing endpoint URL for $p")
+            }
+
+            val reqBuilder = Request.Builder().url(modelsUrl).get()
+            if (key.isNotBlank()) {
+                if (resolveProtocol(p) == "anthropic") {
+                    reqBuilder.header("x-api-key", key)
+                    reqBuilder.header("anthropic-version", "2023-06-01")
+                } else {
+                    reqBuilder.header("Authorization", "Bearer $key")
+                }
+            }
+
+            client.newCall(reqBuilder.build()).execute().use { resp ->
+                val raw = resp.body?.string() ?: ""
+                if (!resp.isSuccessful) {
+                    return@withContext ModelFetchResult(
+                        false,
+                        emptyList(),
+                        "API error HTTP ${resp.code}: ${raw.take(200)}",
+                    )
+                }
+
+                val trimmed = raw.trim()
+                val dataArr: JSONArray = when {
+                    trimmed.startsWith("[") -> JSONArray(trimmed)
+                    trimmed.startsWith("{") -> {
+                        val root = JSONObject(trimmed)
+                        root.optJSONArray("data") ?: root.optJSONArray("models") ?: JSONArray()
+                    }
+                    else -> JSONArray()
+                }
+
+                val parsed = mutableListOf<RemoteModelInfo>()
+                for (i in 0 until dataArr.length()) {
+                    val item = dataArr.opt(i)
+                    if (item is String && item.isNotBlank()) {
+                        parsed.add(RemoteModelInfo(id = item, name = item))
+                        continue
+                    }
+                    val m = item as? JSONObject ?: continue
+                    val id = m.optString("id").ifBlank { m.optString("name") }
+                    if (id.isBlank()) continue
+                    val displayName = m.optString("display_name").ifBlank { m.optString("name").ifBlank { id } }
+                    val pricing = m.optJSONObject("pricing")
+                    val isFree = (pricing != null &&
+                        pricing.optString("prompt") == "0" &&
+                        pricing.optString("completion") == "0") ||
+                        id.endsWith(":free")
+                    parsed.add(RemoteModelInfo(id = id, name = displayName, isFree = isFree))
+                }
+
+                if (parsed.isEmpty()) {
+                    return@withContext ModelFetchResult(false, emptyList(), "API responded OK but returned 0 models.")
+                }
+
+                val sorted = parsed.distinctBy { it.id }.sortedWith(compareBy<RemoteModelInfo> { !it.isFree }.thenBy { it.id })
+                saveCachedModels(p, sorted)
+
+                val currentModel = getProviderModel(p)
+                if (currentModel.isNotBlank() && sorted.none { it.id == currentModel }) {
+                    saveProviderModel(p, "")
+                }
+
+                ModelFetchResult(
+                    ok = true,
+                    models = sorted,
+                    message = "✓ Key verified · ${sorted.size} live models loaded from $p",
+                )
+            }
+        } catch (e: Exception) {
+            ModelFetchResult(false, emptyList(), "Network error: ${e.message ?: "unknown"}")
+        }
+    }
+
+    /**
+     * Step 2: Verify the chosen live model actually responds to a completion request.
+     */
+    suspend fun saveAndTestModel(provider: String, modelId: String): Pair<Boolean, String> {
+        val p = provider.lowercase().trim()
+        val cleanModel = modelId.trim()
         val key = getProviderKey(p)
-        if (key.isBlank()) return false to "No API key saved for $p"
-        val model = getProviderModel(p)
+        val custom = findCustom(p)
+        if (key.isBlank() && (custom == null || !isLocalUrl(custom.baseUrl))) {
+            return false to "Verify your API key first."
+        }
+        if (cleanModel.isBlank()) return false to "Select or enter a model ID first."
+
+        saveProviderModel(p, cleanModel)
         val res = callSingleProvider(
             provider = p,
-            model = model,
+            model = cleanModel,
             apiKey = key,
             messages = listOf(
                 "system" to "Reply with OK.",
@@ -114,8 +367,8 @@ class OnDeviceLLMClient(context: Context) {
             jsonMode = false,
             maxTokens = 16,
         )
-        return if (res.ok) true to "$p ($model) verified ✓"
-        else false to (res.error.ifBlank { "Request failed" })
+        return if (res.ok) true to "$p · $cleanModel verified ✓"
+        else false to (res.error.ifBlank { "Model test failed" })
     }
 
     suspend fun complete(
@@ -126,7 +379,7 @@ class OnDeviceLLMClient(context: Context) {
     ): LLMCallResult {
         val chain = buildFallbackChain(modelSpec)
         if (chain.isEmpty()) {
-            return LLMCallResult(ok = false, isOffline = true, error = "No LLM API key configured")
+            return LLMCallResult(ok = false, isOffline = true, error = "No verified LLM provider/model configured")
         }
         var lastError = ""
         for ((prov, mod, key) in chain) {
@@ -144,12 +397,18 @@ class OnDeviceLLMClient(context: Context) {
             val prov = parts[0].trim().lowercase()
             val mod = parts[1].trim().ifBlank { getProviderModel(prov) }
             val key = getProviderKey(prov)
-            if (key.isNotBlank()) out.add(Triple(prov, mod, key))
+            val custom = findCustom(prov)
+            if (mod.isNotBlank() && (key.isNotBlank() || (custom != null && isLocalUrl(custom.baseUrl)))) {
+                out.add(Triple(prov, mod, key))
+            }
         }
-        for (prov in SUPPORTED_PROVIDERS) {
+        for (prov in allProviderIds()) {
             val key = getProviderKey(prov)
-            if (key.isNotBlank() && out.none { it.first == prov }) {
-                out.add(Triple(prov, getProviderModel(prov), key))
+            val mod = getProviderModel(prov)
+            val custom = findCustom(prov)
+            val hasCreds = key.isNotBlank() || (custom != null && isLocalUrl(custom.baseUrl))
+            if (hasCreds && mod.isNotBlank() && out.none { it.first == prov }) {
+                out.add(Triple(prov, mod, key))
             }
         }
         return out
@@ -164,8 +423,8 @@ class OnDeviceLLMClient(context: Context) {
         maxTokens: Int,
     ): LLMCallResult = withContext(Dispatchers.IO) {
         try {
-            if (provider == "anthropic") {
-                callAnthropic(model, apiKey, messages, maxTokens)
+            if (resolveProtocol(provider) == "anthropic") {
+                callAnthropic(provider, model, apiKey, messages, maxTokens)
             } else {
                 callOpenAiCompat(provider, model, apiKey, messages, jsonMode, maxTokens)
             }
@@ -182,7 +441,10 @@ class OnDeviceLLMClient(context: Context) {
         jsonMode: Boolean,
         maxTokens: Int,
     ): LLMCallResult {
-        val url = prefs.getString("url_$provider", ENDPOINTS[provider]) ?: ENDPOINTS[provider].orEmpty()
+        val url = resolveChatUrl(provider)
+        if (url.isBlank()) {
+            return LLMCallResult(ok = false, provider = provider, model = model, error = "Missing endpoint URL")
+        }
         val msgArray = JSONArray()
         for ((role, content) in messages) {
             msgArray.put(JSONObject().put("role", role).put("content", content))
@@ -198,8 +460,10 @@ class OnDeviceLLMClient(context: Context) {
 
         val reqBuilder = Request.Builder()
             .url(url)
-            .header("Authorization", "Bearer $apiKey")
             .header("Content-Type", "application/json")
+        if (apiKey.isNotBlank()) {
+            reqBuilder.header("Authorization", "Bearer $apiKey")
+        }
         if (provider == "openrouter") {
             reqBuilder.header("HTTP-Referer", "https://github.com/Anisghd-lab/ceo-app")
             reqBuilder.header("X-Title", "CEO App")
@@ -218,11 +482,13 @@ class OnDeviceLLMClient(context: Context) {
     }
 
     private fun callAnthropic(
+        provider: String,
         model: String,
         apiKey: String,
         messages: List<Pair<String, String>>,
         maxTokens: Int,
     ): LLMCallResult {
+        val url = resolveChatUrl(provider).ifBlank { ENDPOINTS["anthropic"]!! }
         val sys = messages.filter { it.first == "system" }.joinToString("\n\n") { it.second }
         val nonSys = JSONArray()
         for ((role, content) in messages.filter { it.first != "system" }) {
@@ -236,7 +502,7 @@ class OnDeviceLLMClient(context: Context) {
         if (sys.isNotBlank()) body.put("system", sys)
 
         val req = Request.Builder()
-            .url(ENDPOINTS["anthropic"]!!)
+            .url(url)
             .header("x-api-key", apiKey)
             .header("anthropic-version", "2023-06-01")
             .header("Content-Type", "application/json")
@@ -246,7 +512,7 @@ class OnDeviceLLMClient(context: Context) {
         client.newCall(req).execute().use { resp ->
             val raw = resp.body?.string() ?: ""
             if (!resp.isSuccessful) {
-                return LLMCallResult(ok = false, provider = "anthropic", model = model, error = "HTTP ${resp.code}: ${raw.take(220)}")
+                return LLMCallResult(ok = false, provider = provider, model = model, error = "HTTP ${resp.code}: ${raw.take(220)}")
             }
             val json = JSONObject(raw)
             val arr = json.getJSONArray("content")
@@ -257,7 +523,7 @@ class OnDeviceLLMClient(context: Context) {
             }
             val usage = json.optJSONObject("usage")
             val tokens = (usage?.optInt("input_tokens", 0) ?: 0) + (usage?.optInt("output_tokens", 0) ?: 0)
-            return LLMCallResult(ok = true, content = sb.toString(), provider = "anthropic", model = model, tokensUsed = tokens)
+            return LLMCallResult(ok = true, content = sb.toString(), provider = provider, model = model, tokensUsed = tokens)
         }
     }
 

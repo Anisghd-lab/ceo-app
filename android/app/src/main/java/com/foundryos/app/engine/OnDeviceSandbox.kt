@@ -58,6 +58,14 @@ class OnDeviceSandbox(private val context: Context) {
         return target
     }
 
+    fun writeUploadBytes(companyId: String, filename: String, bytes: ByteArray): File {
+        val safeName = filename.replace(Regex("[^a-zA-Z0-9._-]"), "_").ifBlank { "upload.bin" }
+        val target = resolveFile(companyId, "workspace/uploads/$safeName")
+        target.parentFile?.mkdirs()
+        target.writeBytes(bytes)
+        return target
+    }
+
     fun readTextFile(companyId: String, relPath: String): String {
         val target = resolveFile(companyId, relPath)
         if (!target.exists()) throw IllegalStateException("File not found: $relPath")
@@ -200,6 +208,13 @@ class OnDeviceSandbox(private val context: Context) {
             }
         }
         return outFile
+    }
+
+    fun sandboxesBaseDir(): File = rootDir
+
+    fun listOutputFiles(companyId: String): List<File> {
+        val outDir = File(companyRoot(companyId), "output")
+        return outDir.listFiles()?.filter { it.isFile && it.length() > 0L }?.sortedByDescending { it.lastModified() } ?: emptyList()
     }
 
     /**

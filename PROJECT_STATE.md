@@ -1,30 +1,28 @@
 # PROJECT_STATE.md — CEO (100% On-Device Android OS)
 
 ## 1. Objectifs Principaux & Vision
-- Application Android native nommée **CEO** avec l'interface exacte de la vidéo (rail latéral rétractable avec mascottes géométriques à badges, cartes `Company Org`, `Deliverable QA`, `Release Ship / Not yet`, `Board meeting`, notifications actionnables).
-- **Zéro VPS requis** : tout le moteur multi-entreprises (`1 Sandbox = 1 Entreprise`, zéro métier hardcodé) tourne nativement sur Android via **Antigravity CLI embarqué (`agy`)** et/ou le routeur Multi-LLM direct (`OpenRouter`, `Gemini`, `Anthropic`, `OpenAI`, `xAI`, `DeepSeek`, `Groq` + fournisseurs custom OpenAI/Anthropic-compatible).
-- **Multi-comptes Google + Quotas en direct** : bascule instantanée entre comptes Google (`jetski-standalone-oauth-token`) sans révoquer les refresh tokens sauvegardés, avec affichage des fenêtres de quota `5h`/`Weekly` et du pourcentage restant par modèle.
-- **Navigateur In-App intégré** : WebView complète intégrée dans `CEO` pour la connexion OAuth Google (callback loopback `127.0.0.1`) et la navigation web générale (avec fallback Chrome Custom Tabs).
+- Application Android native nommée **CEO** avec l'interface exacte de la vidéo (rail latéral rétractable + tiroir overlay animé, barre supérieure sans chevauchement, mascottes géométriques à badges, cartes `Company Org`, `Deliverable QA`, `Release Ship / Not yet`, `Board meeting`, notifications actionnables).
+- **Zéro VPS requis** : tout le moteur multi-entreprises (`1 Sandbox = 1 Entreprise`, zéro métier hardcodé) tourne nativement sur Android via **Antigravity CLI embarqué (`agy`)** et/ou le routeur Multi-LLM direct.
+- **Store de Plugins pré-configurés (façon ChatGPT Apps)** : Notion, Slack, GitHub, Gmail, Google Drive, Figma, Canva, Browser, Kittl, Product Design, TinyFish, Scite — prêts à être connectés dans le navigateur interne `CEO` et immédiatement utilisables par le CEO et tous les bots spécialisés.
+- **Agents autonomes agentic orientés objectifs** : boucle multi-étapes Plan → Outils Plugins/Sandbox → Observation → Raisonnement → QA → Auto-correction → Approval Gate (`Ship / Not yet`).
 - Compilation exclusivement sur **GitHub Actions** et distribution exclusive de l'APK sur **GitHub Releases** (`Anisghd-lab/ceo-app`).
 
 ## 2. État d'Avancement Réel
-- [x] **Antigravity CLI Native Engine (`android/app/.../agy/`)** :
-  - `AgyCliInstaller.kt` : téléchargement manifeste officiel `android_arm64.json`, vérification SHA-512, extraction binaire `agy` vers `filesDir/agy/bin/agy`, `targetSdk = 28` compatible SELinux `execve()`.
-  - `AgyAccountManager.kt` : sauvegarde/switch/ajout multi-comptes Google (`$HOME/.gemini/ceo-accounts/*.json` <-> `jetski-standalone-oauth-token`) sans révocation.
-  - `AgyRuntimeManager.kt` : superviseur `agy --hub`, interception URL OAuth, ConnectRPC HTTP/JSON (`Login`, `GetAuthStatus`, `GetUserStatus`, `GetAvailableModels`, `RetrieveUserQuotaSummary`), repli `agy models`, exécution autonome `agy -p --output-format stream-json --mode auto --dangerously-skip-permissions` dans la sandbox de chaque entreprise.
-- [x] **Moteur 100% On-Device Android (`android/app/.../engine/`)** :
-  - `LocalDatabase.kt` : persistance SQLite WAL complète.
-  - `OnDeviceSandbox.kt` : sandboxes isolées par entreprise, génération PDF multi-pages `PdfDocument`, archives `.zip`, import fichiers locaux (`+`), découverte automatique des fichiers générés dans `output/`, audit QA programmatique.
-  - `OnDeviceLLMClient.kt` : routeur Multi-LLM direct avec découverte des modèles (`/models`), fournisseurs custom configurables et repli transparent.
-  - `AutonomousEngine.kt` : orchestration unifiée via Antigravity CLI ou clés API externes (Strategist → Producer → QA → Approval Gate → Connectors).
-- [x] **UI Intacte, Boutons Responsives & Navigateur In-App** (`MainApp.kt`, `Sheets.kt`, `InAppBrowserDialog.kt`, `VideoCards.kt`, `BotMascot.kt`, `ApprovalNotifier.kt`).
-- [x] **Backend Python (`backend/`)** : 5/5 tests `pytest` verts.
+- [x] **Antigravity CLI Native Engine (`android/app/.../agy/`)** : binaire ARM64 vérifié SHA-512, superviseur `agy --hub`, parsing exact des événements `--output-format stream-json`, multi-comptes Google sans révocation, quotas `5h`/`Weekly` & par modèle.
+- [x] **Store de Plugins & Exécuteur Unifié (`android/app/.../plugins/`)** :
+  - `PluginRegistry.kt` : 12 plugins pré-configurés (`browser`, `notion`, `slack`, `github`, `gmail`, `gdrive`, `figma`, `canva`, `kittl`, `product_design`, `tinyfish`, `scite`).
+  - `PluginAuthManager.kt` : OAuth 2.0 PKCE + loopback local `127.0.0.1`, MCP Dynamic Client Registration + PKCE, détection automatique des sessions cookies dans le navigateur interne `CEO`, tokens/clés optionnels.
+  - `PluginToolExecutor.kt` : exécution directe des outils lecture/recherche/prototypage HTML, et verrou d'approbation humaine (`Ship / Not yet`) pour toute action d'écriture externe (Slack, Gmail, GitHub Issue, Notion Page, Drive Upload).
+- [x] **Agents Hyper-Agentic (`AutonomousEngine.kt`)** :
+  - Raisonnement réel du CEO via `agy CLI` dès qu'on clique sur CEO (`runCeoReasoningTurn`) + boucle multi-étapes ReAct à 6 pas sur le CEO et tous les bots (`runDirectBotChat`, `runFullMission`), avec cycle de révision automatique QA → Creator si score `< 70`.
+- [x] **UI Corrigée & Navigateur In-App** (`MainApp.kt`, `Sheets.kt`, `InAppBrowserDialog.kt`).
+- [x] **Backend Python (`backend/`)** : 5/5 tests `pytest` verts sur CI.
 
 ## 3. Lacunes, Dettes Techniques & Points de Vigilance
-- Les comptes Google ajoutés via WebView peuvent nécessiter le bouton "Chrome" intégré si le compte impose une clé de sécurité matérielle / Passkey Google FIDO.
-- L'installation binaire `agy` cible les smartphones Android ARM64 (`arm64-v8a`), qui représentent quasi 100 % des téléphones Android modernes.
+- Certains services (Gmail, Google Drive, Slack, Canva, GitHub) nécessitent un `client_id` OAuth ou un token/PAT (saisissable via l'icône clé 🔑 de chaque plugin) si l'accès via session navigateur WebView seule ne suffit pas pour les appels REST directs.
+- L'installation binaire `agy` cible les smartphones Android ARM64 (`arm64-v8a`).
 
 ## 4. Prochaines Étapes
-1. Ajouter la sélection de modèle Antigravity ou LLM spécifique directement par bot depuis la carte `Company Org`.
-2. Ajouter la saisie vocale sur le compositeur de message.
-3. Exporter le dossier complet d'une entreprise en `.zip` partageable en un clic.
+1. Ajouter la sélection individuelle de modèle (`agy` / LLM) par bot depuis l'organigramme `Company Org`.
+2. Ajouter la capture d'écran WebView directe vers `sandbox/output/` pour l'outil `browser_read_url`.
+3. Tester les flux OAuth PKCE & MCP end-to-end sur appareil réel.

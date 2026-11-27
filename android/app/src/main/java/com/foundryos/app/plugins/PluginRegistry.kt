@@ -1,0 +1,211 @@
+package com.foundryos.app.plugins
+
+import com.foundryos.app.data.PluginAuthType
+import com.foundryos.app.data.PluginDefinition
+import com.foundryos.app.data.PluginToolDef
+
+/**
+ * Pre-configured ChatGPT-style App & Plugin Catalog embedded inside CEO.
+ * Every plugin arrives pre-wired with endpoints, OAuth/MCP/WebSession config, and structured tools
+ * so users simply connect inside CEO's In-App Browser and bots execute real work toward company goals.
+ */
+object PluginRegistry {
+
+    val ALL: List<PluginDefinition> = listOf(
+        PluginDefinition(
+            id = "browser",
+            name = "Browser",
+            category = "Research & Web",
+            tagline = "Live web search, authenticated page reading & DOM extraction",
+            authType = PluginAuthType.NONE_READY,
+            loginUrl = "https://www.google.com",
+            tools = listOf(
+                PluginToolDef("browser_search", "Search the live web for factual up-to-date results", false, "{\"query\":\"...\"}"),
+                PluginToolDef("browser_read_url", "Open a URL using CEO Browser session cookies and extract clean page content & links", false, "{\"url\":\"https://...\"}"),
+            ),
+        ),
+        PluginDefinition(
+            id = "notion",
+            name = "Notion",
+            category = "Workspace & Docs",
+            tagline = "Search pages, read specs, create & update Notion workspaces",
+            authType = PluginAuthType.MCP_OAUTH,
+            loginUrl = "https://www.notion.so/login",
+            authorizeUrl = "https://api.notion.com/v1/oauth/authorize",
+            tokenUrl = "https://api.notion.com/v1/oauth/token",
+            apiBaseUrl = "https://api.notion.com/v1",
+            mcpUrl = "https://mcp.notion.com/mcp",
+            keyPortalUrl = "https://www.notion.so/profile/integrations",
+            cookieDomain = "https://www.notion.so",
+            tools = listOf(
+                PluginToolDef("notion_search", "Search Notion pages and databases", false, "{\"query\":\"...\"}"),
+                PluginToolDef("notion_read_page", "Read blocks/content from a Notion page ID", false, "{\"page_id\":\"...\"}"),
+                PluginToolDef("notion_create_page", "Create a new structured Notion page or brief", true, "{\"parent_id\":\"...\",\"title\":\"...\",\"markdown\":\"...\"}"),
+            ),
+        ),
+        PluginDefinition(
+            id = "slack",
+            name = "Slack",
+            category = "Team Communication",
+            tagline = "Read channels, summarize threads & post approved updates",
+            authType = PluginAuthType.OAUTH_PKCE,
+            loginUrl = "https://slack.com/signin",
+            authorizeUrl = "https://slack.com/oauth/v2/authorize",
+            tokenUrl = "https://slack.com/api/oauth.v2.access",
+            scopes = "channels:read,channels:history,chat:write,users:read",
+            apiBaseUrl = "https://slack.com/api",
+            keyPortalUrl = "https://api.slack.com/apps",
+            cookieDomain = "https://app.slack.com",
+            tools = listOf(
+                PluginToolDef("slack_list_channels", "List public/joined Slack channels", false, "{}"),
+                PluginToolDef("slack_read_channel", "Read recent messages from a Slack channel", false, "{\"channel_id\":\"...\",\"limit\":15}"),
+                PluginToolDef("slack_post_message", "Send a message to a Slack channel (requires Human Yes)", true, "{\"channel_id\":\"...\",\"text\":\"...\"}"),
+            ),
+        ),
+        PluginDefinition(
+            id = "github",
+            name = "GitHub",
+            category = "Engineering & Code",
+            tagline = "Inspect repos, read source code, open issues & ship PRs",
+            authType = PluginAuthType.DEVICE_FLOW,
+            loginUrl = "https://github.com/login",
+            authorizeUrl = "https://github.com/login/oauth/authorize",
+            tokenUrl = "https://github.com/login/oauth/access_token",
+            scopes = "repo read:user",
+            apiBaseUrl = "https://api.github.com",
+            keyPortalUrl = "https://github.com/settings/tokens/new?scopes=repo,read:user&description=CEO-Android-App",
+            cookieDomain = "https://github.com",
+            tools = listOf(
+                PluginToolDef("github_list_repos", "List repositories for the connected GitHub account", false, "{}"),
+                PluginToolDef("github_read_file", "Read a file from a GitHub repository", false, "{\"owner\":\"...\",\"repo\":\"...\",\"path\":\"...\"}"),
+                PluginToolDef("github_create_issue", "Create a GitHub issue in a repository (requires Human Yes)", true, "{\"owner\":\"...\",\"repo\":\"...\",\"title\":\"...\",\"body\":\"...\"}"),
+            ),
+        ),
+        PluginDefinition(
+            id = "gmail",
+            name = "Gmail",
+            category = "Email & Outreach",
+            tagline = "Search inbox, read threads, draft replies & send approved emails",
+            authType = PluginAuthType.OAUTH_PKCE,
+            loginUrl = "https://mail.google.com",
+            authorizeUrl = "https://accounts.google.com/o/oauth2/v2/auth",
+            tokenUrl = "https://oauth2.googleapis.com/token",
+            scopes = "https://www.googleapis.com/auth/gmail.modify https://www.googleapis.com/auth/userinfo.email",
+            apiBaseUrl = "https://gmail.googleapis.com/gmail/v1",
+            keyPortalUrl = "https://console.cloud.google.com/apis/credentials",
+            cookieDomain = "https://mail.google.com",
+            tools = listOf(
+                PluginToolDef("gmail_search", "Search emails in Gmail inbox", false, "{\"query\":\"in:inbox\",\"max\":10}"),
+                PluginToolDef("gmail_read_message", "Read full content of a Gmail message ID", false, "{\"message_id\":\"...\"}"),
+                PluginToolDef("gmail_send", "Send an email from connected Gmail account (requires Human Yes)", true, "{\"to\":\"...\",\"subject\":\"...\",\"body\":\"...\"}"),
+            ),
+        ),
+        PluginDefinition(
+            id = "gdrive",
+            name = "Google Drive",
+            category = "Files & Knowledge",
+            tagline = "Find Docs/Sheets/PDFs, read contents & upload deliverables",
+            authType = PluginAuthType.OAUTH_PKCE,
+            loginUrl = "https://drive.google.com",
+            authorizeUrl = "https://accounts.google.com/o/oauth2/v2/auth",
+            tokenUrl = "https://oauth2.googleapis.com/token",
+            scopes = "https://www.googleapis.com/auth/drive.file https://www.googleapis.com/auth/drive.readonly https://www.googleapis.com/auth/userinfo.email",
+            apiBaseUrl = "https://www.googleapis.com/drive/v3",
+            keyPortalUrl = "https://console.cloud.google.com/apis/credentials",
+            cookieDomain = "https://drive.google.com",
+            tools = listOf(
+                PluginToolDef("gdrive_search", "Search files and Google Docs in Google Drive", false, "{\"query\":\"...\"}"),
+                PluginToolDef("gdrive_read_file", "Export/read a Google Doc or text file from Drive", false, "{\"file_id\":\"...\"}"),
+                PluginToolDef("gdrive_upload", "Upload a sandbox deliverable file to Google Drive (requires Human Yes)", true, "{\"rel_path\":\"output/...\",\"name\":\"...\"}"),
+            ),
+        ),
+        PluginDefinition(
+            id = "figma",
+            name = "Figma",
+            category = "Product Design",
+            tagline = "Inspect design systems, frames, tokens & comments via Figma MCP/API",
+            authType = PluginAuthType.MCP_OAUTH,
+            loginUrl = "https://www.figma.com/login",
+            authorizeUrl = "https://www.figma.com/oauth",
+            tokenUrl = "https://api.figma.com/v1/oauth/token",
+            scopes = "file_content:read file_comments:read",
+            apiBaseUrl = "https://api.figma.com/v1",
+            mcpUrl = "https://mcp.figma.com/mcp",
+            keyPortalUrl = "https://www.figma.com/developers/api#access-tokens",
+            cookieDomain = "https://www.figma.com",
+            tools = listOf(
+                PluginToolDef("figma_get_file", "Inspect Figma file structure, pages and styles", false, "{\"file_key\":\"...\"}"),
+                PluginToolDef("figma_get_comments", "List design feedback comments on a Figma file", false, "{\"file_key\":\"...\"}"),
+            ),
+        ),
+        PluginDefinition(
+            id = "canva",
+            name = "Canva",
+            category = "Visual Design",
+            tagline = "Browse Canva designs, retrieve brand templates & creative sessions",
+            authType = PluginAuthType.OAUTH_PKCE,
+            loginUrl = "https://www.canva.com/login",
+            authorizeUrl = "https://www.canva.com/api/oauth/authorize",
+            tokenUrl = "https://api.canva.com/rest/v1/oauth/token",
+            scopes = "design:meta:read design:content:read design:content:write",
+            apiBaseUrl = "https://api.canva.com/rest/v1",
+            keyPortalUrl = "https://www.canva.com/developers/",
+            cookieDomain = "https://www.canva.com",
+            tools = listOf(
+                PluginToolDef("canva_list_designs", "List your Canva designs and templates", false, "{\"query\":\"...\"}"),
+            ),
+        ),
+        PluginDefinition(
+            id = "kittl",
+            name = "Kittl",
+            category = "Visual Design",
+            tagline = "Web-session access inside CEO Browser + print/merch design briefs",
+            authType = PluginAuthType.WEB_SESSION,
+            loginUrl = "https://www.kittl.com/login",
+            cookieDomain = "https://www.kittl.com",
+            tools = listOf(
+                PluginToolDef("kittl_read_workspace", "Read authenticated Kittl dashboard/projects using CEO Browser session", false, "{\"url\":\"https://www.kittl.com/projects\"}"),
+            ),
+        ),
+        PluginDefinition(
+            id = "product_design",
+            name = "Product Design",
+            category = "Product Design",
+            tagline = "Built-in UI/UX Architect: builds interactive HTML/CSS prototypes & design specs",
+            authType = PluginAuthType.NONE_READY,
+            tools = listOf(
+                PluginToolDef("product_design_prototype", "Write an interactive responsive HTML/CSS UI prototype directly into sandbox output/", false, "{\"filename\":\"prototype.html\",\"title\":\"...\",\"html\":\"...\"}"),
+            ),
+        ),
+        PluginDefinition(
+            id = "tinyfish",
+            name = "TinyFish",
+            category = "Web Automation",
+            tagline = "AI web scraping & structured extraction agent",
+            authType = PluginAuthType.API_KEY,
+            loginUrl = "https://app.tinyfish.io",
+            apiBaseUrl = "https://agent.tinyfish.ai/v1",
+            keyPortalUrl = "https://app.tinyfish.io",
+            cookieDomain = "https://app.tinyfish.io",
+            tools = listOf(
+                PluginToolDef("tinyfish_extract", "Run structured web extraction via TinyFish API or browser fallback", false, "{\"url\":\"https://...\",\"goal\":\"...\"}"),
+            ),
+        ),
+        PluginDefinition(
+            id = "scite",
+            name = "Scite",
+            category = "Scientific Research",
+            tagline = "Search peer-reviewed citations & verify scientific claims",
+            authType = PluginAuthType.API_KEY,
+            loginUrl = "https://scite.ai/login",
+            apiBaseUrl = "https://api.scite.ai",
+            keyPortalUrl = "https://scite.ai/account",
+            cookieDomain = "https://scite.ai",
+            tools = listOf(
+                PluginToolDef("scite_search", "Search scientific papers & smart citation tallies on Scite", false, "{\"query\":\"...\"}"),
+            ),
+        ),
+    )
+
+    fun byId(id: String): PluginDefinition? = ALL.firstOrNull { it.id.equals(id, ignoreCase = true) }
+}

@@ -10,6 +10,8 @@ import com.foundryos.app.data.BotItem
 import com.foundryos.app.data.ChatMessageItem
 import com.foundryos.app.data.CompanyItem
 import com.foundryos.app.data.CompanyProposalData
+import com.foundryos.app.plugins.PluginAuthManager
+import com.foundryos.app.plugins.PluginToolExecutor
 import com.foundryos.app.service.ApprovalNotifier
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -34,6 +36,8 @@ class AutonomousEngine(
     private val sandbox: OnDeviceSandbox,
     private val llm: OnDeviceLLMClient,
     private val agy: AgyRuntimeManager? = null,
+    private val pluginAuth: PluginAuthManager? = null,
+    private val pluginExecutor: PluginToolExecutor? = null,
 ) {
     private val prefs = context.getSharedPreferences("ceo_engine_prefs", Context.MODE_PRIVATE)
     private val httpClient = OkHttpClient.Builder()
@@ -135,11 +139,12 @@ class AutonomousEngine(
             "$description"
 
             Design the exact team of specialist bots (3 to 6 bots, NOT counting the CEO which is added automatically).
+            ${pluginExecutor?.activeToolsSummaryForPrompt().orEmpty()}
             Rules:
             - Output strictly ONE JSON object.
             - MUST include at least ONE independent Quality/Verification bot (`"is_qa": true`) that audits deliverables before human approval.
             - MUST include a Memory bot (`company_memory`) to keep all bots aligned.
-            - Available atomic tools per bot: ${JSONArray(atomicTools)}
+            - Assign both sandbox atomic tools (${JSONArray(atomicTools)}) and relevant connected/available plugin tool names in `allowed_tools` per specialist bot so every bot understands its exact job and reaches the company objective.
             - Suggest useful external REST APIs/connectors in `recommended_connectors`.
 
             JSON schema:
@@ -492,57 +497,44 @@ class AutonomousEngine(
             }
 
         val systemPrompt = """
-            You are the Founder's AI CEO of '${comp.name}' running directly inside an on-device sandbox via Antigravity CLI (`agy`).
-            Company mission: ${comp.description}
+            You are the Founder's AI CEO of '${comp.name}' running directly inside an on-device sandbox with Antigravity CLI (`agy`) and connected Plugins.
+            Company objective: ${comp.description}
             Your team: $teamDesc
             Sandbox files: ${files.ifBlank { "none" }}
+            ${pluginExecutor?.activeToolsSummaryForPrompt().orEmpty()}
             Company memory:
             ${mem.ifBlank { "none" }}
 
             Instructions:
             - Respond in the exact same language as the Founder (e.g. French if the founder writes in French).
-            - Think step-by-step and give a genuinely reasoned, concrete, helpful CEO answer (analysis, strategy, architecture, decisions, clarifications). Never output canned filler.
-            - ONLY if the Founder explicitly asks you to build/generate a downloadable deliverable (PDF, ZIP, code package, report) OR run a full team production pipeline with QA + Approval, respond with ONE JSON object:
-              {"action":"run_mission","title":"Short mission title","goal":"Detailed mission goal","ceo_reply":"Your reasoned CEO plan explaining how you delegate this to the team"}
-            - Otherwise (questions, discussions, brainstorming, opinions, follow-ups), respond directly in crisp prose/markdown with your CEO reasoning.
+            - Think step-by-step and give a genuinely reasoned, concrete, helpful CEO answer aligned with the company objective. Never output canned filler.
+            - You CAN call any connected Plugin or Sandbox tool directly before answering by outputting ONE JSON object:
+              {"action":"tool","tool":"<tool_name>","args":{...}}
+              Supported sandbox tools: list_files, read_file, write_file, create_pdf, create_zip, product_design_prototype.
+              Or ANY connected plugin tool above (browser_search, browser_read_url, notion_search, github_list_repos, slack_list_channels, gmail_search, gdrive_search, figma_get_file, canva_list_designs, scite_search, tinyfish_extract, etc.).
+            - ONLY if the Founder wants a full multi-bot pipeline producing deliverables with QA + Approval, output:
+              {"action":"run_mission","title":"Short mission title","goal":"Detailed mission goal","ceo_reply":"Your reasoned CEO plan explaining how your specialists will use plugins & LLMs"}
+            - When ready to reply directly (or after tool observations), respond with clean prose/markdown (or {"action":"final","reply":"..."}).
         """.trimIndent()
 
-        val promptWithHistory = buildString {
-            if (recentChat.isNotBlank()) {
-                append("Recent conversation:\n").append(recentChat).append("\n\n")
-            }
-            append("Latest message to CEO:\n").append(userPrompt)
-        }
+        val history = mutableListOf<String>()
+        if (recentChat.isNotBlank()) history.add("Recent conversation:\n$recentChat")
+        history.add("Latest message to CEO:\n$userPrompt")
 
-        val res = runAiCompletion(
-            systemPrompt = systemPrompt,
-            userPrompt = promptWithHistory,
-            sandboxDir = sandbox.companyRoot(comp.id),
-            modelSpec = ceoBot?.model ?: "auto",
-            maxTokens = 2000,
-            onStatus = onStatusUpdate,
-        )
-
-        if (!res.ok) {
-            ceoBot?.let { db.updateBotStatus(it.id, "idle", "Error") }
-            db.insertMessage(
-                ChatMessageItem(
-                    "msg_${UUID.randomUUID().toString().take(10)}",
-                    comp.id,
-                    "bot",
-                    botId = ceoBot?.id,
-                    botName = "CEO",
-                    content = "⚠️ Antigravity CLI n'a pas pu répondre (${res.provider}) : ${res.error}",
-                )
+        var finalReply = ""
+        for (step in 1..6) {
+            if (killSwitch) break
+            onStatusUpdate(if (step == 1) "CEO reasoning via Antigravity CLI..." else "CEO step $step/6...")
+            val res = runAiCompletion(
+                systemPrompt = systemPrompt,
+                userPrompt = history.joinToString("\n\n"),
+                sandboxDir = sandbox.companyRoot(comp.id),
+                modelSpec = ceoBot?.model ?: "auto",
+                maxTokens = 2200,
+                onStatus = onStatusUpdate,
             )
-            return
-        }
-
-        db.addTokensUsed(comp.id, res.tokensUsed)
-        val maybeJson = llm.extractJsonObject(res.content)
-        if (maybeJson != null && maybeJson.optString("action").equals("run_mission", ignoreCase = true)) {
-            val ceoReply = maybeJson.optString("ceo_reply").trim()
-            if (ceoReply.isNotBlank()) {
+            if (!res.ok) {
+                ceoBot?.let { db.updateBotStatus(it.id, "idle", "Error") }
                 db.insertMessage(
                     ChatMessageItem(
                         "msg_${UUID.randomUUID().toString().take(10)}",
@@ -550,26 +542,68 @@ class AutonomousEngine(
                         "bot",
                         botId = ceoBot?.id,
                         botName = "CEO",
-                        content = ceoReply,
+                        content = "⚠️ Antigravity CLI / LLM n'a pas pu répondre (${res.provider}) : ${res.error}",
                     )
                 )
+                return
             }
-            val mTitle = maybeJson.optString("title").ifBlank { userPrompt.take(58) }
-            val mGoal = maybeJson.optString("goal").ifBlank { userPrompt }
-            runFullMission(comp, bots, title = mTitle, goal = mGoal, onStatusUpdate = onStatusUpdate)
-        } else {
-            ceoBot?.let { db.updateBotStatus(it.id, "idle", res.content.take(48)) }
-            db.insertMessage(
-                ChatMessageItem(
-                    "msg_${UUID.randomUUID().toString().take(10)}",
-                    comp.id,
-                    "bot",
-                    botId = ceoBot?.id,
-                    botName = "CEO",
-                    content = res.content,
-                )
-            )
+            db.addTokensUsed(comp.id, res.tokensUsed)
+            val obj = llm.extractJsonObject(res.content)
+            val act = obj?.optString("action")?.lowercase().orEmpty()
+            when {
+                act == "run_mission" -> {
+                    val ceoReply = obj?.optString("ceo_reply").orEmpty().trim()
+                    if (ceoReply.isNotBlank()) {
+                        db.insertMessage(
+                            ChatMessageItem(
+                                "msg_${UUID.randomUUID().toString().take(10)}",
+                                comp.id,
+                                "bot",
+                                botId = ceoBot?.id,
+                                botName = "CEO",
+                                content = ceoReply,
+                            )
+                        )
+                    }
+                    val mTitle = obj?.optString("title").orEmpty().ifBlank { userPrompt.take(58) }
+                    val mGoal = obj?.optString("goal").orEmpty().ifBlank { userPrompt }
+                    runFullMission(comp, bots, title = mTitle, goal = mGoal, onStatusUpdate = onStatusUpdate)
+                    return
+                }
+                act == "tool" && obj != null -> {
+                    val toolName = obj.optString("tool")
+                    val args = obj.optJSONObject("args") ?: JSONObject()
+                    onStatusUpdate("CEO calling $toolName...")
+                    val (obs, createdArt) = executeAnyTool(comp, ceoBot ?: bots.first(), toolName, args, onStatusUpdate)
+                    createdArt?.let { emitArtifactCard(comp, ceoBot?.name ?: "CEO", it) }
+                    history.add("Step $step CEO called $toolName($args)")
+                    history.add("Observation:\n$obs")
+                }
+                act == "final" && obj != null -> {
+                    finalReply = obj.optString("reply").ifBlank { obj.optString("summary") }.ifBlank { res.content }
+                    break
+                }
+                else -> {
+                    finalReply = res.content
+                    break
+                }
+            }
         }
+
+        if (finalReply.isBlank()) {
+            finalReply = history.lastOrNull().orEmpty().ifBlank { "Action exécutée dans la sandbox." }
+        }
+        ceoBot?.let { db.updateBotStatus(it.id, "idle", finalReply.take(48)) }
+        db.insertMessage(
+            ChatMessageItem(
+                "msg_${UUID.randomUUID().toString().take(10)}",
+                comp.id,
+                "bot",
+                botId = ceoBot?.id,
+                botName = "CEO",
+                content = finalReply,
+            )
+        )
     }
 
     private suspend fun runDirectBotChat(
@@ -589,19 +623,58 @@ class AutonomousEngine(
                 val who = if (m.senderType == "human") "Founder" else m.botName.ifBlank { "CEO" }
                 "$who: ${m.content.take(300)}"
             }
-        val res = runAiCompletion(
-            systemPrompt = "You are ${bot.name} (${bot.role}) at '${comp.name}'. Instructions: ${bot.systemPrompt}\nSandbox files: ${files.ifBlank { "none" }}\nCompany memory:\n$mem\nReply in the user's language with genuine reasoning.",
-            userPrompt = if (recentChat.isBlank()) userText else "Recent conversation:\n$recentChat\n\nFounder message:\n$userText",
-            sandboxDir = sandbox.companyRoot(comp.id),
-            modelSpec = bot.model,
-            maxTokens = 1600,
-            onStatus = onStatusUpdate,
-        )
-        if (res.ok) {
+
+        val sysPrompt = """
+            You are ${bot.name} (${bot.role}) at '${comp.name}'.
+            Company objective: ${comp.description}
+            Your instructions: ${bot.systemPrompt}
+            Your assigned tools: ${bot.allowedTools.joinToString(", ")}
+            Sandbox files: ${files.ifBlank { "none" }}
+            ${pluginExecutor?.activeToolsSummaryForPrompt().orEmpty()}
+            Company memory:
+            ${mem.ifBlank { "none" }}
+
+            You are an autonomous agentic specialist. Always understand the Founder's request in context of the company objective:
+            - To execute a sandbox tool or connected plugin tool before answering, reply ONLY with JSON:
+              {"action":"tool","tool":"<tool_name>","args":{...}}
+            - Otherwise reply directly with your reasoned specialist answer (or {"action":"final","reply":"..."}). Match the Founder's language.
+        """.trimIndent()
+
+        val history = mutableListOf<String>()
+        if (recentChat.isNotBlank()) history.add("Recent conversation:\n$recentChat")
+        history.add("Founder request for ${bot.name}:\n$userText")
+
+        for (step in 1..6) {
+            if (killSwitch) break
+            onStatusUpdate("${bot.name} reasoning (step $step)...")
+            val res = runAiCompletion(
+                systemPrompt = sysPrompt,
+                userPrompt = history.joinToString("\n\n"),
+                sandboxDir = sandbox.companyRoot(comp.id),
+                modelSpec = bot.model,
+                maxTokens = 1800,
+                onStatus = onStatusUpdate,
+            )
+            if (!res.ok) return "⚠️ Erreur IA (${res.provider}): ${res.error}"
             db.addTokensUsed(comp.id, res.tokensUsed)
-            return res.content
+
+            val obj = llm.extractJsonObject(res.content)
+            val act = obj?.optString("action")?.lowercase().orEmpty()
+            if (act == "tool" && obj != null) {
+                val toolName = obj.optString("tool")
+                val args = obj.optJSONObject("args") ?: JSONObject()
+                onStatusUpdate("${bot.name} running $toolName...")
+                val (obs, createdArt) = executeAnyTool(comp, bot, toolName, args, onStatusUpdate)
+                createdArt?.let { emitArtifactCard(comp, bot.name, it) }
+                history.add("Step $step called $toolName($args)")
+                history.add("Observation:\n$obs")
+            } else if (act == "final" && obj != null) {
+                return obj.optString("reply").ifBlank { res.content }
+            } else {
+                return res.content
+            }
         }
-        return "⚠️ Erreur IA (${res.provider}): ${res.error}"
+        return history.lastOrNull().orEmpty()
     }
 
     private suspend fun runFullMission(
@@ -621,22 +694,19 @@ class AutonomousEngine(
         db.insertMission(missionId, comp.id, title, goal)
         db.updateBotStatus(ceoBot.id, "working", "Delegating mission...")
 
-        // Step 1: Strategist / Scoping (if available and AI engine active)
+        // Step 1: Strategist / Scoping (Agentic with connected Plugins + LLM)
         var scopedSpec = goal
         if (strategistBot != null && hasActiveEngine()) {
-            onStatusUpdate("${strategistBot.name} is scoping...")
-            db.updateBotStatus(strategistBot.id, "working", "Writing spec...")
-            val specRes = runAiCompletion(
-                systemPrompt = "You are ${strategistBot.name} (${strategistBot.role}) at '${comp.name}'. Produce a sharp structured outline & quality criteria for the deliverable.",
-                userPrompt = "Company: ${comp.description}\nMission: $goal",
-                sandboxDir = sandbox.companyRoot(comp.id),
-                modelSpec = strategistBot.model,
-                maxTokens = 1000,
-                onStatus = onStatusUpdate,
+            onStatusUpdate("${strategistBot.name} researching with plugins...")
+            db.updateBotStatus(strategistBot.id, "working", "Research & Spec...")
+            val specReply = runDirectBotChat(
+                comp = comp,
+                bot = strategistBot,
+                userText = "Research this mission for '${comp.name}' (Objective: ${comp.description}) using relevant plugins (browser_search, browser_read_url, notion_search, github_list_repos, scite_search, gdrive_search, etc.) if useful, then produce a detailed actionable specification and quality checklist.\nMission: $goal",
+                onStatusUpdate = onStatusUpdate,
             )
-            if (specRes.ok) {
-                scopedSpec = specRes.content
-                db.addTokensUsed(comp.id, specRes.tokensUsed)
+            if (!specReply.startsWith("⚠️")) {
+                scopedSpec = specReply
                 sandbox.writeTextFile(comp.id, "workspace/${missionId}_spec.md", scopedSpec)
                 db.updateBotStatus(strategistBot.id, "idle", "Spec done", incrementUnread = true)
             } else {
@@ -644,19 +714,42 @@ class AutonomousEngine(
             }
         }
 
-        // Step 2: Producer Bot runs ReAct Tool Loop inside isolated Android sandbox
+        // Step 2: Producer Bot runs Multi-Step Agentic Loop inside isolated Android sandbox + Plugins
         onStatusUpdate("${producerBot.name} is building in sandbox...")
         db.updateBotStatus(producerBot.id, "working", "Building deliverable...")
 
-        val createdArtifacts = runProducerAgentLoop(comp, producerBot, missionId, title, goal, scopedSpec)
+        var createdArtifacts = runProducerAgentLoop(comp, producerBot, missionId, title, goal, scopedSpec, onStatusUpdate)
         db.updateBotStatus(producerBot.id, "idle", "Deliverable ready", incrementUnread = true)
 
-        // Step 3: Independent Quality Auditor checks every artifact
+        // Step 3: Independent Quality Auditor checks every artifact against company objective
         onStatusUpdate("${qaBot.name} is verifying quality...")
         db.updateBotStatus(qaBot.id, "working", "Auditing in sandbox...")
 
-        val primaryArt = createdArtifacts.firstOrNull()
-        val (qaPassed, qaScore, qaReport) = runIndependentQa(comp, qaBot, primaryArt, goal)
+        var primaryArt = createdArtifacts.firstOrNull()
+        var qaTuple = runIndependentQa(comp, qaBot, primaryArt, goal)
+
+        // Self-correction cycle: if QA fails or scores < 70, Producer automatically revises once!
+        if ((!qaTuple.first || qaTuple.second < 70) && hasActiveEngine() && !killSwitch) {
+            onStatusUpdate("${producerBot.name} revising after QA (${qaTuple.second}/100)...")
+            db.updateBotStatus(producerBot.id, "working", "Fixing QA issues...")
+            val revised = runProducerAgentLoop(
+                comp,
+                producerBot,
+                missionId,
+                title,
+                goal,
+                "QA CRITIQUE (${qaTuple.second}/100): ${qaTuple.third}\nFix every flaw above.\n\nOriginal Spec:\n$scopedSpec",
+                onStatusUpdate,
+            )
+            if (revised.isNotEmpty()) {
+                createdArtifacts = revised
+                primaryArt = revised.firstOrNull()
+                qaTuple = runIndependentQa(comp, qaBot, primaryArt, goal)
+            }
+            db.updateBotStatus(producerBot.id, "idle", "Revised", incrementUnread = true)
+        }
+
+        val (qaPassed, qaScore, qaReport) = qaTuple
         db.updateBotStatus(qaBot.id, "idle", "QA $qaScore/100", incrementUnread = true)
 
         for (art in createdArtifacts) {
@@ -740,6 +833,7 @@ class AutonomousEngine(
         title: String,
         goal: String,
         spec: String,
+        onStatusUpdate: suspend (String) -> Unit = {},
     ): List<ArtifactItem> {
         val created = mutableListOf<ArtifactItem>()
         if (!hasActiveEngine()) {
@@ -751,16 +845,18 @@ class AutonomousEngine(
         val existingOutNames = sandbox.listOutputFiles(comp.id).map { it.name }.toSet()
 
         if (canUseAgyEngine()) {
-            // Antigravity CLI natively executes multi-step reasoning + file tools inside compRoot
+            // Antigravity CLI executes reasoning + file creation inside compRoot
             val agyRes = runAiCompletion(
                 systemPrompt = """
                     You are ${bot.name} (${bot.role}) at company '${comp.name}'.
-                    Company mission: ${comp.description}
+                    Company objective: ${comp.description}
                     Your instructions: ${bot.systemPrompt}
+                    ${pluginExecutor?.activeToolsSummaryForPrompt().orEmpty()}
 
                     Work inside this sandbox directory (${compRoot.absolutePath}).
                     Create high-quality deliverable files inside output/ (e.g. output/${slugify(title)}.md or .html or .csv or scripts) AND/OR return a single JSON object:
                     {"action": "tool", "tool": "create_pdf", "args": {"filename": "${slugify(title)}.pdf", "title": "...", "subtitle": "...", "sections": [{"heading": "...", "body": "..."}]}}
+                    If you want to call a connected plugin tool, respond with {"action":"tool","tool":"<plugin_tool>","args":{...}}.
                     If you already wrote deliverable files directly into output/, respond with:
                     {"title": "...", "subtitle": "...", "sections": [{"heading": "...", "body": "..."}]} so we also generate a crisp PDF companion.
                 """.trimIndent(),
@@ -768,25 +864,27 @@ class AutonomousEngine(
                 sandboxDir = compRoot,
                 modelSpec = bot.model,
                 maxTokens = 3200,
+                onStatus = onStatusUpdate,
             )
             if (agyRes.ok) {
                 db.addTokensUsed(comp.id, agyRes.tokensUsed)
-                // 1) Pick up any new real files Antigravity CLI wrote directly into output/
                 val newFiles = sandbox.listOutputFiles(comp.id).filter { it.name !in existingOutNames }
                 for (f in newFiles) {
                     created.add(registerArtifact(comp.id, bot.name, f.nameWithoutExtension, f, "Generated in sandbox via Antigravity CLI"))
                 }
-                // 2) Check if Antigravity CLI returned JSON tool / sections to compile a PDF
                 val parsed = llm.extractJsonObject(agyRes.content)
                 if (parsed != null) {
-                    if (parsed.optString("tool") == "create_pdf") {
+                    val toolName = parsed.optString("tool")
+                    if (toolName == "create_pdf") {
                         val args = parsed.optJSONObject("args") ?: JSONObject()
-                        executeSandboxTool(comp, bot, "create_pdf", args).second?.let { created.add(it) }
+                        executeAnyTool(comp, bot, "create_pdf", args, onStatusUpdate).second?.let { created.add(it) }
+                    } else if (toolName.isNotBlank()) {
+                        val args = parsed.optJSONObject("args") ?: JSONObject()
+                        executeAnyTool(comp, bot, toolName, args, onStatusUpdate).second?.let { created.add(it) }
                     } else if (parsed.has("sections")) {
-                        executeSandboxTool(comp, bot, "create_pdf", parsed.put("filename", "${slugify(title)}.pdf")).second?.let { created.add(it) }
+                        executeAnyTool(comp, bot, "create_pdf", parsed.put("filename", "${slugify(title)}.pdf"), onStatusUpdate).second?.let { created.add(it) }
                     }
                 } else if (created.isEmpty() && agyRes.content.length > 80) {
-                    // Turn Antigravity CLI markdown/text response into a structured PDF artifact
                     val file = sandbox.createPdf(
                         companyId = comp.id,
                         filename = "${slugify(title)}.pdf",
@@ -804,22 +902,24 @@ class AutonomousEngine(
         if (created.isEmpty() && llm.hasAnyKey()) {
             val sysPrompt = """
                 You are ${bot.name} (${bot.role}) at company '${comp.name}'.
-                Company mission: ${comp.description}
+                Company objective: ${comp.description}
                 Your instructions: ${bot.systemPrompt}
+                ${pluginExecutor?.activeToolsSummaryForPrompt().orEmpty()}
 
                 You work inside an isolated Android sandbox. You MUST reply strictly with ONE JSON object:
-                Option 1 (call a tool):
+                Option 1 (call a sandbox or plugin tool):
                 {"action": "tool", "tool": "create_pdf", "args": {"filename": "slug.pdf", "title": "...", "subtitle": "...", "sections": [{"heading": "...", "body": "..."}]}}
-                Other tools:
+                Sandbox tools:
                 - "list_files": {}
                 - "read_file": {"rel_path": "workspace/uploads/file.txt"}
                 - "write_file": {"rel_path": "output/file.md", "content": "..."}
                 - "create_zip": {"zip_filename": "bundle.zip", "rel_paths": ["output/file1.pdf", "output/file2.md"]}
-                - "web_fetch": {"url": "https://..."}
+                - "product_design_prototype": {"filename": "prototype.html", "title": "...", "html": "..."}
+                Or ANY connected plugin tool above!
                 Option 2 (finish after files are created):
                 {"action": "final", "summary": "...", "primary_rel_path": "output/slug.pdf"}
 
-                Make sure the content inside create_pdf / write_file is genuinely thorough, rich, actionable, and publish-ready — never shallow placeholders.
+                Make sure all content is genuinely thorough, rich, actionable, and publish-ready — never shallow placeholders.
             """.trimIndent()
 
             val history = mutableListOf(
@@ -827,7 +927,7 @@ class AutonomousEngine(
                 "user" to "Mission: $title\nGoal: $goal\nSpec:\n$spec",
             )
 
-            for (step in 1..4) {
+            for (step in 1..6) {
                 if (killSwitch) break
                 val res = llm.complete(history, modelSpec = bot.model, jsonMode = true, maxTokens = 3200)
                 if (!res.ok) break
@@ -837,7 +937,7 @@ class AutonomousEngine(
                 if (action == "tool") {
                     val tool = parsed.optString("tool")
                     val args = parsed.optJSONObject("args") ?: JSONObject()
-                    val toolRes = executeSandboxTool(comp, bot, tool, args)
+                    val toolRes = executeAnyTool(comp, bot, tool, args, onStatusUpdate)
                     val art = toolRes.second
                     if (art != null) created.add(art)
                     history.add("assistant" to parsed.toString())
@@ -869,6 +969,87 @@ class AutonomousEngine(
             created.add(buildFallbackPdfArtifact(comp, bot, title, goal, spec))
         }
         return created
+    }
+
+    private suspend fun executeAnyTool(
+        comp: CompanyItem,
+        bot: BotItem,
+        tool: String,
+        args: JSONObject,
+        onStatusUpdate: suspend (String) -> Unit = {},
+    ): Pair<String, ArtifactItem?> {
+        val exec = pluginExecutor
+        if (exec != null && exec.isPluginTool(tool)) {
+            onStatusUpdate("${bot.name} using plugin '$tool'...")
+            val res = exec.execute(comp.id, tool, args, allowWriteExecution = false)
+            if (res.requiresApproval) {
+                val aprId = "apr_${UUID.randomUUID().toString().take(10)}"
+                val payload = JSONObject()
+                    .put("plugin_tool", tool)
+                    .put("plugin_args", args)
+                    .put("completion_message", "Executed plugin '$tool' for ${comp.name}.")
+                val approval = ApprovalItem(
+                    id = aprId,
+                    companyId = comp.id,
+                    title = res.approvalTitle.ifBlank { "Run $tool?" },
+                    subtitle = "${bot.name} · ${res.approvalSummary}",
+                    actionType = "PLUGIN_EXEC",
+                    actionPayloadJson = payload.toString(),
+                    status = "PENDING",
+                )
+                db.insertApproval(approval)
+                db.insertMessage(
+                    ChatMessageItem(
+                        "msg_${UUID.randomUUID().toString().take(10)}",
+                        comp.id,
+                        "bot",
+                        botName = "CEO",
+                        content = "${bot.name} wants to run `$tool`. Approve to execute?",
+                        cardType = "approval",
+                    ),
+                    rawPayloadJson = JSONObject().put("id", aprId).toString(),
+                )
+                ApprovalNotifier.showApprovalNotification(context, approval)
+            }
+            // If plugin wrote a file (e.g., product_design_prototype -> output/*.html), register it
+            val objOut = runCatching { JSONObject(res.output) }.getOrNull()
+            val relPath = objOut?.optString("rel_path").orEmpty()
+            var createdArt: ArtifactItem? = null
+            if (relPath.startsWith("output/")) {
+                val f = sandbox.resolveFile(comp.id, relPath)
+                if (f.exists()) {
+                    createdArt = registerArtifact(comp.id, bot.name, f.nameWithoutExtension, f, "Generated via $tool")
+                }
+            }
+            return res.output to createdArt
+        }
+        return executeSandboxTool(comp, bot, tool, args)
+    }
+
+    private fun emitArtifactCard(comp: CompanyItem, botName: String, art: ArtifactItem) {
+        val payload = JSONObject()
+            .put("id", art.id)
+            .put("bot_name", botName)
+            .put("title", art.title)
+            .put("filename", art.filename)
+            .put("rel_path", art.relPath)
+            .put("mime_type", art.mimeType)
+            .put("size_bytes", art.sizeBytes)
+            .put("summary", art.summary)
+            .put("qa_status", art.qaStatus)
+            .put("qa_score", art.qaScore)
+            .put("qa_report", art.qaReport)
+        db.insertMessage(
+            ChatMessageItem(
+                "msg_${UUID.randomUUID().toString().take(10)}",
+                comp.id,
+                "bot",
+                botName = botName,
+                content = "$botName created ${art.filename}",
+                cardType = "artifact",
+            ),
+            rawPayloadJson = payload.toString(),
+        )
     }
 
     private suspend fun executeSandboxTool(
@@ -1047,7 +1228,14 @@ class AutonomousEngine(
             db.getApproval(approvalId)
         }
 
-    private fun executeApprovedAction(companyId: String, actionType: String, payload: JSONObject): String {
+    private suspend fun executeApprovedAction(companyId: String, actionType: String, payload: JSONObject): String {
+        if (actionType == "PLUGIN_EXEC") {
+            val tool = payload.optString("plugin_tool")
+            val args = payload.optJSONObject("plugin_args") ?: JSONObject()
+            val exec = pluginExecutor ?: return "Plugin executor unavailable."
+            val res = exec.execute(companyId, tool, args, allowWriteExecution = true)
+            return if (res.ok) "✅ $tool executed: ${res.output.take(180)}" else "❌ $tool failed: ${res.output.take(180)}"
+        }
         if (actionType == "HTTP_ACTION") {
             val connName = payload.optString("connector")
             val conn = db.listConnectors(companyId).firstOrNull { it.name.equals(connName, ignoreCase = true) }

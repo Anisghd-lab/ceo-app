@@ -84,6 +84,7 @@ fun InAppBrowserDialog(
     initialUrl: String,
     isOAuthSession: Boolean = false,
     onOAuthLoopbackHit: () -> Unit = {},
+    onUrlVisited: (String) -> Unit = {},
     onDismiss: () -> Unit,
 ) {
     val context = LocalContext.current
@@ -397,6 +398,7 @@ fun InAppBrowserDialog(
                                     if (!url.isNullOrBlank()) {
                                         currentUrl = url
                                         addressInput = url
+                                        onUrlVisited(url)
                                         if (url.startsWith("http://127.0.0.1") || url.startsWith("http://localhost")) {
                                             onOAuthLoopbackHit()
                                         }

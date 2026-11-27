@@ -26,13 +26,17 @@ import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Delete
 import androidx.compose.material.icons.rounded.Download
+import androidx.compose.material.icons.rounded.Extension
+import androidx.compose.material.icons.rounded.LinkOff
 import androidx.compose.material.icons.rounded.PersonAdd
+import androidx.compose.material.icons.rounded.Public
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material.icons.rounded.SwapHoriz
 import androidx.compose.material.icons.rounded.Terminal
 import androidx.compose.material.icons.rounded.Visibility
 import androidx.compose.material.icons.rounded.VisibilityOff
+import androidx.compose.material.icons.rounded.VpnKey
 import androidx.compose.material.icons.rounded.Warning
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -71,6 +75,8 @@ import com.foundryos.app.data.AgyQuotaGroup
 import com.foundryos.app.data.ArtifactItem
 import com.foundryos.app.data.CompanyProposalData
 import com.foundryos.app.data.ConnectorItem
+import com.foundryos.app.data.PluginAuthType
+import com.foundryos.app.data.PluginStatus
 import com.foundryos.app.data.ProviderStatus
 import com.foundryos.app.data.RemoteModelInfo
 import com.foundryos.app.ui.components.ArtifactDeliverableCard
@@ -261,6 +267,7 @@ fun SettingsDialog(
     agyQuotaGroups: List<AgyQuotaGroup>,
     agyBusyLabel: String?,
     agyInstallProgress: Float?,
+    plugins: List<PluginStatus>,
     providers: List<ProviderStatus>,
     connectors: List<ConnectorItem>,
     killSwitch: Boolean,
@@ -270,6 +277,8 @@ fun SettingsDialog(
     statusIsSuccess: Boolean,
     getSavedKey: (String) -> String,
     getCachedModels: (String) -> List<RemoteModelInfo>,
+    getPluginToken: (String) -> String,
+    getPluginClientId: (String) -> String,
     onTogglePreferAgy: (Boolean) -> Unit,
     onInstallOrUpdateAgy: () -> Unit,
     onAgyLogin: () -> Unit,
@@ -279,6 +288,10 @@ fun SettingsDialog(
     onAgyDeleteAccount: (String) -> Unit,
     onRefreshAgyQuotas: () -> Unit,
     onSelectAgyModel: (String) -> Unit,
+    onConnectPluginInBrowser: (String) -> Unit,
+    onSavePluginToken: (String, String) -> Unit,
+    onSavePluginClientId: (String, String) -> Unit,
+    onDisconnectPlugin: (String) -> Unit,
     onAddCustomProvider: (String, String, String) -> String,
     onDeleteCustomProvider: (String) -> Unit,
     onFetchModels: (String, String) -> Unit,
@@ -757,6 +770,216 @@ fun SettingsDialog(
                                 }
                             }
                         }
+                    }
+                }
+            }
+
+            Spacer(Modifier.height(14.dp))
+            HorizontalDivider(color = FoundryColors.Border)
+            Spacer(Modifier.height(12.dp))
+
+            // === PRE-CONFIGURED PLUGINS & APPS (CHATGPT STYLE -> CONNECT VIA IN-APP BROWSER) ===
+            var expandedPluginId by remember { mutableStateOf<String?>(null) }
+            var pluginTokenDraft by remember { mutableStateOf("") }
+            var pluginClientIdDraft by remember { mutableStateOf("") }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween,
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
+                    Icon(Icons.Rounded.Extension, contentDescription = null, tint = FoundryColors.InkPrimary, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(7.dp))
+                    Column {
+                        Text("Plugins & Apps (${plugins.count { it.connected }}/${plugins.size} active)", style = MaterialTheme.typography.titleMedium)
+                        Text(
+                            "Pre-configured for CEO & all bots · Connect in CEO Browser",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = FoundryColors.InkSecondary,
+                        )
+                    }
+                }
+            }
+            Spacer(Modifier.height(8.dp))
+
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(16.dp))
+                    .background(FoundryColors.SidebarBg)
+                    .border(1.dp, FoundryColors.Border, RoundedCornerShape(16.dp)),
+            ) {
+                plugins.forEachIndexed { idx, ps ->
+                    val def = ps.definition
+                    val isExp = expandedPluginId == def.id
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp, vertical = 10.dp),
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                    Text(def.name, fontSize = 13.5.sp, fontWeight = FontWeight.SemiBold, color = FoundryColors.InkPrimary)
+                                    Text(
+                                        text = if (ps.connected) "Connected ✓" else def.category,
+                                        fontSize = 10.sp,
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = if (ps.connected) FoundryColors.GreenInk else FoundryColors.InkSecondary,
+                                        maxLines = 1,
+                                        softWrap = false,
+                                        modifier = Modifier
+                                            .clip(RoundedCornerShape(999.dp))
+                                            .background(if (ps.connected) FoundryColors.GreenBg else Color.White)
+                                            .padding(horizontal = 7.dp, vertical = 2.dp),
+                                    )
+                                }
+                                Text(
+                                    text = def.tagline,
+                                    fontSize = 11.sp,
+                                    color = FoundryColors.InkSecondary,
+                                    maxLines = 2,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                                Text(
+                                    text = "${ps.accountLabel} · ${def.tools.size} tool(s)",
+                                    fontSize = 10.5.sp,
+                                    color = if (ps.connected) FoundryColors.GreenInk else FoundryColors.InkMuted,
+                                )
+                            }
+
+                            Spacer(Modifier.width(8.dp))
+
+                            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                if (def.authType != PluginAuthType.NONE_READY) {
+                                    Box(
+                                        modifier = Modifier
+                                            .heightIn(min = 36.dp)
+                                            .clip(RoundedCornerShape(999.dp))
+                                            .background(if (ps.connected) Color.White else FoundryColors.InkPrimary)
+                                            .border(1.dp, FoundryColors.Border, RoundedCornerShape(999.dp))
+                                            .clickable { onConnectPluginInBrowser(def.id) }
+                                            .padding(horizontal = 11.dp, vertical = 7.dp),
+                                        contentAlignment = Alignment.Center,
+                                    ) {
+                                        Row(verticalAlignment = Alignment.CenterVertically) {
+                                            Icon(
+                                                Icons.Rounded.Public,
+                                                contentDescription = null,
+                                                tint = if (ps.connected) FoundryColors.InkPrimary else Color.White,
+                                                modifier = Modifier.size(13.dp),
+                                            )
+                                            Spacer(Modifier.width(4.dp))
+                                            Text(
+                                                text = if (ps.connected) "Open" else "Connect",
+                                                fontSize = 11.5.sp,
+                                                fontWeight = FontWeight.SemiBold,
+                                                maxLines = 1,
+                                                softWrap = false,
+                                                color = if (ps.connected) FoundryColors.InkPrimary else Color.White,
+                                            )
+                                        }
+                                    }
+                                    IconButton(
+                                        onClick = {
+                                            if (isExp) {
+                                                expandedPluginId = null
+                                            } else {
+                                                expandedPluginId = def.id
+                                                pluginTokenDraft = getPluginToken(def.id)
+                                                pluginClientIdDraft = getPluginClientId(def.id)
+                                            }
+                                        },
+                                        modifier = Modifier.size(32.dp),
+                                    ) {
+                                        Icon(Icons.Rounded.VpnKey, contentDescription = "Token / OAuth Config", tint = FoundryColors.InkSecondary, modifier = Modifier.size(16.dp))
+                                    }
+                                }
+                            }
+                        }
+
+                        if (isExp && def.authType != PluginAuthType.NONE_READY) {
+                            Spacer(Modifier.height(8.dp))
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .background(Color.White)
+                                    .border(1.dp, FoundryColors.Border, RoundedCornerShape(12.dp))
+                                    .padding(10.dp),
+                            ) {
+                                OutlinedTextField(
+                                    value = pluginTokenDraft,
+                                    onValueChange = { pluginTokenDraft = it },
+                                    label = { Text("${def.name} Token / API Key (optional if signed in via Browser)") },
+                                    singleLine = true,
+                                    shape = RoundedCornerShape(10.dp),
+                                    modifier = Modifier.fillMaxWidth(),
+                                )
+                                if (def.authType == PluginAuthType.OAUTH_PKCE || def.authType == PluginAuthType.MCP_OAUTH || def.authType == PluginAuthType.DEVICE_FLOW) {
+                                    Spacer(Modifier.height(6.dp))
+                                    OutlinedTextField(
+                                        value = pluginClientIdDraft,
+                                        onValueChange = { pluginClientIdDraft = it },
+                                        label = { Text("OAuth Client ID (optional, for 1-click PKCE)") },
+                                        singleLine = true,
+                                        shape = RoundedCornerShape(10.dp),
+                                        modifier = Modifier.fillMaxWidth(),
+                                    )
+                                }
+                                Spacer(Modifier.height(8.dp))
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                ) {
+                                    Box(
+                                        modifier = Modifier
+                                            .weight(1f)
+                                            .heightIn(min = 38.dp)
+                                            .clip(RoundedCornerShape(999.dp))
+                                            .background(FoundryColors.InkPrimary)
+                                            .clickable {
+                                                if (pluginTokenDraft.isNotBlank()) onSavePluginToken(def.id, pluginTokenDraft.trim())
+                                                if (pluginClientIdDraft.isNotBlank()) onSavePluginClientId(def.id, pluginClientIdDraft.trim())
+                                                expandedPluginId = null
+                                            }
+                                            .padding(horizontal = 12.dp, vertical = 8.dp),
+                                        contentAlignment = Alignment.Center,
+                                    ) {
+                                        Text("Save", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, softWrap = false)
+                                    }
+                                    if (ps.connected) {
+                                        Box(
+                                            modifier = Modifier
+                                                .heightIn(min = 38.dp)
+                                                .clip(RoundedCornerShape(999.dp))
+                                                .background(FoundryColors.RedBg)
+                                                .clickable {
+                                                    onDisconnectPlugin(def.id)
+                                                    pluginTokenDraft = ""
+                                                    expandedPluginId = null
+                                                }
+                                                .padding(horizontal = 12.dp, vertical = 8.dp),
+                                            contentAlignment = Alignment.Center,
+                                        ) {
+                                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                                Icon(Icons.Rounded.LinkOff, contentDescription = null, tint = FoundryColors.RedInk, modifier = Modifier.size(14.dp))
+                                                Spacer(Modifier.width(4.dp))
+                                                Text("Disconnect", color = FoundryColors.RedInk, fontSize = 12.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, softWrap = false)
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if (idx < plugins.lastIndex) {
+                        HorizontalDivider(color = FoundryColors.Border, thickness = 0.5.dp)
                     }
                 }
             }

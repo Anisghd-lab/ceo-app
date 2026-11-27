@@ -92,6 +92,7 @@ import com.foundryos.app.data.CompanyItem
 import com.foundryos.app.data.CompanyProposalData
 import com.foundryos.app.data.ConnectorItem
 import com.foundryos.app.data.FoundryRepository
+import com.foundryos.app.data.PluginStatus
 import com.foundryos.app.data.ProviderStatus
 import com.foundryos.app.service.ApprovalNotifier
 import com.foundryos.app.ui.components.ArtifactDeliverableCard
@@ -159,6 +160,7 @@ fun FoundryMainScreen(repo: FoundryRepository) {
 
     var hasAnyKey by remember { mutableStateOf(false) }
     var engineSummary by remember { mutableStateOf("On-Device Engine") }
+    var pluginStatuses by remember { mutableStateOf<List<PluginStatus>>(emptyList()) }
     var providers by remember { mutableStateOf<List<ProviderStatus>>(emptyList()) }
     var killSwitch by remember { mutableStateOf(repo.killSwitch) }
     var isFetchingModels by remember { mutableStateOf(false) }
@@ -172,6 +174,7 @@ fun FoundryMainScreen(repo: FoundryRepository) {
         val (keyOk, summary) = repo.engineStatus()
         hasAnyKey = keyOk
         engineSummary = summary
+        pluginStatuses = repo.getPluginStatuses()
         providers = repo.getProviderStatuses()
         killSwitch = repo.killSwitch
 
@@ -958,6 +961,7 @@ fun FoundryMainScreen(repo: FoundryRepository) {
             agyQuotaGroups = agyQuotaGroups,
             agyBusyLabel = agyBusyLabel,
             agyInstallProgress = agyInstallProgress,
+            plugins = pluginStatuses,
             providers = providers,
             connectors = connectors,
             killSwitch = killSwitch,
@@ -967,6 +971,8 @@ fun FoundryMainScreen(repo: FoundryRepository) {
             statusIsSuccess = settingsSuccess,
             getSavedKey = { prov -> repo.getProviderKey(prov) },
             getCachedModels = { prov -> repo.getCachedModels(prov) },
+            getPluginToken = { id -> repo.getPluginToken(id) },
+            getPluginClientId = { id -> repo.getPluginClientId(id) },
             onTogglePreferAgy = { enabled ->
                 repo.setAgyPreferEnabled(enabled)
                 agyPreferEngine = enabled
@@ -1048,6 +1054,38 @@ fun FoundryMainScreen(repo: FoundryRepository) {
                 refreshAll(activeCompanyId)
                 Toast.makeText(context, "Antigravity model set to $modelId", Toast.LENGTH_SHORT).show()
             },
+            onConnectPluginInBrowser = { pluginId ->
+                scope.launch {
+                    val launch = repo.beginPluginConnectInBrowser(pluginId) { ok, msg ->
+                        refreshAll(activeCompanyId)
+                        Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
+                        if (ok) showBrowserDialog = false
+                    }
+                    if (launch.ok && launch.urlToOpen.isNotBlank()) {
+                        browserUrl = launch.urlToOpen
+                        browserIsOAuth = launch.isOAuthLoopback
+                        showBrowserDialog = true
+                    }
+                    if (launch.message.isNotBlank()) {
+                        Toast.makeText(context, launch.message, Toast.LENGTH_SHORT).show()
+                    }
+                }
+            },
+            onSavePluginToken = { pluginId, token ->
+                repo.savePluginToken(pluginId, token)
+                refreshAll(activeCompanyId)
+                Toast.makeText(context, "Saved $pluginId credentials", Toast.LENGTH_SHORT).show()
+            },
+            onSavePluginClientId = { pluginId, clientId ->
+                repo.setPluginClientId(pluginId, clientId)
+                refreshAll(activeCompanyId)
+                Toast.makeText(context, "Saved OAuth Client ID for $pluginId", Toast.LENGTH_SHORT).show()
+            },
+            onDisconnectPlugin = { pluginId ->
+                repo.disconnectPlugin(pluginId)
+                refreshAll(activeCompanyId)
+                Toast.makeText(context, "Disconnected $pluginId", Toast.LENGTH_SHORT).show()
+            },
             onAddCustomProvider = { name, baseUrl, protocol ->
                 val slug = repo.addCustomProvider(name, baseUrl, protocol)
                 settingsSuccess = true
@@ -1108,8 +1146,14 @@ fun FoundryMainScreen(repo: FoundryRepository) {
                 scope.launch {
                     delay(1200)
                     refreshAgyState(fetchQuotas = true)
-                    Toast.makeText(context, "Google Sign-In completed!", Toast.LENGTH_SHORT).show()
+                    refreshAll(activeCompanyId)
+                    Toast.makeText(context, "Sign-In completed!", Toast.LENGTH_SHORT).show()
                     showBrowserDialog = false
+                }
+            },
+            onUrlVisited = { visitedUrl ->
+                if (repo.syncBrowserCookiesForUrl(visitedUrl)) {
+                    refreshAll(activeCompanyId)
                 }
             },
             onDismiss = {

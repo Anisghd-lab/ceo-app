@@ -185,3 +185,53 @@ data class AgyModelInfo(
     val remainingFraction: Float? = null,
     val resetCountdown: String = "",
 )
+
+enum class PluginAuthType {
+    NONE_READY,   // Always ready on-device (Browser, Product Design)
+    OAUTH_PKCE,   // OAuth 2.0 PKCE + loopback 127.0.0.1 in In-App Browser
+    MCP_OAUTH,    // Official MCP HTTP server with Dynamic Client Registration + PKCE
+    DEVICE_FLOW,  // OAuth Device Flow + Browser verification / PAT fallback
+    API_KEY,      // API Key retrieved via In-App Browser portal
+    WEB_SESSION,  // Persistent authenticated cookies inside CEO Browser
+}
+
+data class PluginToolDef(
+    val name: String,
+    val description: String,
+    val isWriteAction: Boolean = false,
+    val argsSchema: String = "{}",
+)
+
+data class PluginDefinition(
+    val id: String,
+    val name: String,
+    val category: String,
+    val tagline: String,
+    val authType: PluginAuthType,
+    val loginUrl: String = "",
+    val authorizeUrl: String = "",
+    val tokenUrl: String = "",
+    val scopes: String = "",
+    val apiBaseUrl: String = "",
+    val mcpUrl: String = "",
+    val keyPortalUrl: String = "",
+    val cookieDomain: String = "",
+    val defaultClientId: String = "",
+    val tools: List<PluginToolDef> = emptyList(),
+)
+
+data class PluginStatus(
+    val definition: PluginDefinition,
+    val connected: Boolean,
+    val accountLabel: String = "",
+    val statusDetail: String = "",
+    val hasCustomClientId: Boolean = false,
+)
+
+data class PluginToolResult(
+    val ok: Boolean,
+    val output: String,
+    val requiresApproval: Boolean = false,
+    val approvalTitle: String = "",
+    val approvalSummary: String = "",
+)

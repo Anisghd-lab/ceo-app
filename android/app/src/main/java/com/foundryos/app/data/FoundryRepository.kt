@@ -11,6 +11,9 @@ import com.foundryos.app.engine.AutonomousEngine
 import com.foundryos.app.engine.LocalDatabase
 import com.foundryos.app.engine.OnDeviceLLMClient
 import com.foundryos.app.engine.OnDeviceSandbox
+import com.foundryos.app.plugins.PluginAuthManager
+import com.foundryos.app.plugins.PluginLoginLaunch
+import com.foundryos.app.plugins.PluginToolExecutor
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -37,7 +40,9 @@ class FoundryRepository(private val context: Context) {
     private val sandbox = OnDeviceSandbox(context)
     private val llm = OnDeviceLLMClient(context)
     private val agy = agyManager(context)
-    private val engine = AutonomousEngine(context, db, sandbox, llm, agy)
+    private val pluginAuth = PluginAuthManager(context.applicationContext)
+    private val pluginExecutor = PluginToolExecutor(context.applicationContext, pluginAuth, sandbox)
+    private val engine = AutonomousEngine(context, db, sandbox, llm, agy, pluginAuth, pluginExecutor)
 
     fun engineStatus(): Pair<Boolean, String> {
         val agyReady = agy.preferAgyEngine && agy.installer.isInstalled() && agy.accounts.readLiveToken() != null
@@ -271,6 +276,26 @@ class FoundryRepository(private val context: Context) {
 
     suspend fun fetchAgyModelsAndQuotas(): Pair<List<AgyModelInfo>, List<AgyQuotaGroup>> =
         agy.fetchModelsAndQuotas(sandbox.sandboxesBaseDir())
+
+    fun getPluginStatuses(): List<PluginStatus> = pluginAuth.getPluginStatuses()
+
+    fun getPluginToken(pluginId: String): String = pluginAuth.getAccessToken(pluginId)
+
+    fun savePluginToken(pluginId: String, token: String, label: String = "") =
+        pluginAuth.saveToken(pluginId, token, accountLabel = label)
+
+    fun getPluginClientId(pluginId: String): String = pluginAuth.getCustomClientId(pluginId)
+
+    fun setPluginClientId(pluginId: String, clientId: String) = pluginAuth.setCustomClientId(pluginId, clientId)
+
+    fun disconnectPlugin(pluginId: String) = pluginAuth.disconnect(pluginId)
+
+    suspend fun beginPluginConnectInBrowser(
+        pluginId: String,
+        onOAuthCompleted: suspend (Boolean, String) -> Unit = { _, _ -> },
+    ): PluginLoginLaunch = pluginAuth.beginConnectInBrowser(pluginId, onOAuthCompleted)
+
+    fun syncBrowserCookiesForUrl(url: String): Boolean = pluginAuth.syncBrowserCookiesForUrl(url)
 
     var killSwitch: Boolean
         get() = engine.killSwitch

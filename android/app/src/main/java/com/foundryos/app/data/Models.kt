@@ -82,6 +82,7 @@ data class CompanyProposalData(
     val recommendedConnectors: List<String>,
     val bots: List<BotItem>,
     val rawProposalJson: String,
+    val errorNote: String = "",
 )
 
 data class ChatMessageItem(

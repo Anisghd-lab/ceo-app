@@ -166,10 +166,15 @@ class AutonomousEngine(
         if (parsed != null && parsed.optJSONArray("bots")?.length() ?: 0 >= 2) {
             return normalizeProposal(parsed, description)
         }
-        return synthesizeAdaptiveFallback(description)
+        val errDetail = when {
+            !hasActiveEngine() -> "Aucun moteur IA connecté (installez Antigravity CLI et connectez Google dans ⚙️ Settings)."
+            !resp.ok -> "Erreur moteur IA (${resp.provider}): ${resp.error.take(180)}"
+            else -> "Réponse IA non structurée: ${resp.content.take(140)}"
+        }
+        return synthesizeAdaptiveFallback(description, errDetail)
     }
 
-    private fun normalizeProposal(raw: JSONObject, description: String): CompanyProposalData {
+    private fun normalizeProposal(raw: JSONObject, description: String, errorNote: String = ""): CompanyProposalData {
         val name = raw.optString("name").ifBlank { "New Venture" }.take(44)
         val mission = raw.optString("mission_statement").ifBlank { description.take(180) }
         val strategy = raw.optString("strategy_summary").ifBlank {
@@ -248,10 +253,11 @@ class AutonomousEngine(
             recommendedConnectors = conns,
             bots = bots,
             rawProposalJson = raw.toString(),
+            errorNote = errorNote,
         )
     }
 
-    private fun synthesizeAdaptiveFallback(description: String): CompanyProposalData {
+    private fun synthesizeAdaptiveFallback(description: String, errorNote: String = ""): CompanyProposalData {
         val clean = description.trim()
         val words = clean.split(Regex("\\s+")).map { it.trim('.', ',', '!', '?', ';', ':', '"', '\'') }.filter { it.length > 3 }
         val name = if (words.isNotEmpty()) words.take(3).joinToString(" ") { it.replaceFirstChar { c -> c.uppercase() } }.take(34) else "Autonomous Venture"
@@ -305,7 +311,7 @@ class AutonomousEngine(
                     )
                 ),
             )
-        return normalizeProposal(raw, description)
+        return normalizeProposal(raw, description, errorNote)
     }
 
     suspend fun deployCompany(description: String, proposal: CompanyProposalData): CompanyItem = withContext(Dispatchers.IO) {
@@ -336,13 +342,21 @@ class AutonomousEngine(
         db.rememberNote("mem_${UUID.randomUUID().toString().take(8)}", cid, "Memory", "founding", "Company '${proposal.name}' founded: ${proposal.missionStatement}")
 
         db.insertMessage(ChatMessageItem("msg_${UUID.randomUUID().toString().take(10)}", cid, "human", content = description))
+        val ceoOpening = buildString {
+            if (proposal.errorNote.isNotBlank()) {
+                append("⚠️ ").append(proposal.errorNote).append("\n\n")
+            }
+            append(proposal.strategySummary.ifBlank {
+                "Entreprise '${proposal.name}' prête (${persistedBots.size} bots). Dis-moi quel objectif tu veux analyser ou construire."
+            })
+        }
         db.insertMessage(
             ChatMessageItem(
                 "msg_${UUID.randomUUID().toString().take(10)}",
                 cid,
                 "bot",
                 botName = "CEO",
-                content = "Hiring your company: ${persistedBots.size} bots and one human, you. Nothing ships without your yes.",
+                content = ceoOpening,
             )
         )
 
@@ -408,55 +422,186 @@ class AutonomousEngine(
         val enrichedPrompt = if (attachmentsSummary.isBlank()) text else "$text\n\n$attachmentsSummary"
 
         val bots = db.listBots(companyId)
-        if (targetBotId != null) {
-            val targetBot = bots.firstOrNull { it.id == targetBotId }
-            if (targetBot != null && !targetBot.isCeo) {
-                onStatusUpdate("${targetBot.name} is thinking...")
-                db.updateBotStatus(targetBot.id, "working", "Handling your message...")
-                val reply = runDirectBotChat(comp, targetBot, enrichedPrompt)
-                db.updateBotStatus(targetBot.id, "idle", reply.take(50))
-                db.insertMessage(
-                    ChatMessageItem(
-                        "msg_${UUID.randomUUID().toString().take(10)}",
-                        companyId,
-                        "bot",
-                        botId = targetBot.id,
-                        botName = targetBot.name,
-                        content = reply,
-                    )
-                )
-                return
-            }
-        }
+        val ceoBot = bots.firstOrNull { it.isCeo } ?: bots.firstOrNull()
+        val targetBot = targetBotId?.let { id -> bots.firstOrNull { it.id == id } }
 
-        val lower = text.lowercase()
-        if (listOf("board meeting", "bilan", "rapport", "report", "metrics", "kpi").any { it in lower }) {
-            generateBoardMeeting(companyId)
+        if (targetBot != null && !targetBot.isCeo) {
+            onStatusUpdate("${targetBot.name} is reasoning...")
+            db.updateBotStatus(targetBot.id, "working", "Thinking...")
+            val reply = runDirectBotChat(comp, targetBot, enrichedPrompt, onStatusUpdate)
+            db.updateBotStatus(targetBot.id, "idle", reply.take(50))
+            db.insertMessage(
+                ChatMessageItem(
+                    "msg_${UUID.randomUUID().toString().take(10)}",
+                    companyId,
+                    "bot",
+                    botId = targetBot.id,
+                    botName = targetBot.name,
+                    content = reply,
+                )
+            )
             return
         }
 
-        runFullMission(comp, bots, title = text.ifBlank { "Analyze attached files" }.take(58), goal = enrichedPrompt, onStatusUpdate = onStatusUpdate)
+        // User is addressing CEO directly -> always reason via Antigravity CLI / active AI engine
+        runCeoReasoningTurn(comp, ceoBot, bots, enrichedPrompt, onStatusUpdate)
     }
 
-    private suspend fun runDirectBotChat(comp: CompanyItem, bot: BotItem, userText: String): String {
+    private suspend fun runCeoReasoningTurn(
+        comp: CompanyItem,
+        ceoBot: BotItem?,
+        bots: List<BotItem>,
+        userPrompt: String,
+        onStatusUpdate: suspend (String) -> Unit,
+    ) {
+        if (!hasActiveEngine()) {
+            val diag = when {
+                agy == null || !agy.installer.isInstalled() ->
+                    "Antigravity CLI (`agy`) n'est pas encore installé sur ce téléphone. Ouvre ⚙️ Settings → Antigravity CLI → « Install CLI », puis connecte ton compte Google."
+                agy.accounts.readLiveToken() == null ->
+                    "Antigravity CLI est installé mais aucun compte Google n'est connecté. Ouvre ⚙️ Settings → « Sign in with Google » pour que je puisse raisonner avec tes modèles."
+                !agy.preferAgyEngine ->
+                    "L'exécution via Antigravity CLI est désactivée et aucune clé API externe n'est configurée. Active « Run CEO via Antigravity CLI » ou ajoute une clé dans ⚙️ Settings."
+                else ->
+                    "Aucun moteur IA actif. Configure Antigravity CLI ou une clé API dans ⚙️ Settings."
+            }
+            db.insertMessage(
+                ChatMessageItem(
+                    "msg_${UUID.randomUUID().toString().take(10)}",
+                    comp.id,
+                    "bot",
+                    botId = ceoBot?.id,
+                    botName = "CEO",
+                    content = "⚠️ $diag",
+                )
+            )
+            return
+        }
+
+        ceoBot?.let { db.updateBotStatus(it.id, "working", "Reasoning via agy...") }
+        onStatusUpdate("CEO is thinking with Antigravity CLI...")
+
         val mem = db.recallNotes(comp.id, 6).joinToString("\n")
         val files = sandbox.listFiles(comp.id).joinToString(", ") { "${it.first} (${it.second}B)" }
+        val teamDesc = bots.joinToString(", ") { "${it.name} (${it.role})" }
+        val recentChat = db.listMessages(comp.id)
+            .takeLast(8)
+            .joinToString("\n") { m ->
+                val who = if (m.senderType == "human") "Founder" else m.botName.ifBlank { "CEO" }
+                "$who: ${m.content.take(400)}"
+            }
+
+        val systemPrompt = """
+            You are the Founder's AI CEO of '${comp.name}' running directly inside an on-device sandbox via Antigravity CLI (`agy`).
+            Company mission: ${comp.description}
+            Your team: $teamDesc
+            Sandbox files: ${files.ifBlank { "none" }}
+            Company memory:
+            ${mem.ifBlank { "none" }}
+
+            Instructions:
+            - Respond in the exact same language as the Founder (e.g. French if the founder writes in French).
+            - Think step-by-step and give a genuinely reasoned, concrete, helpful CEO answer (analysis, strategy, architecture, decisions, clarifications). Never output canned filler.
+            - ONLY if the Founder explicitly asks you to build/generate a downloadable deliverable (PDF, ZIP, code package, report) OR run a full team production pipeline with QA + Approval, respond with ONE JSON object:
+              {"action":"run_mission","title":"Short mission title","goal":"Detailed mission goal","ceo_reply":"Your reasoned CEO plan explaining how you delegate this to the team"}
+            - Otherwise (questions, discussions, brainstorming, opinions, follow-ups), respond directly in crisp prose/markdown with your CEO reasoning.
+        """.trimIndent()
+
+        val promptWithHistory = buildString {
+            if (recentChat.isNotBlank()) {
+                append("Recent conversation:\n").append(recentChat).append("\n\n")
+            }
+            append("Latest message to CEO:\n").append(userPrompt)
+        }
+
         val res = runAiCompletion(
-            systemPrompt = "You are ${bot.name} (${bot.role}) at '${comp.name}'. Instructions: ${bot.systemPrompt}\nSandbox files: ${files.ifBlank { "none" }}\nCompany memory:\n$mem",
-            userPrompt = userText,
+            systemPrompt = systemPrompt,
+            userPrompt = promptWithHistory,
+            sandboxDir = sandbox.companyRoot(comp.id),
+            modelSpec = ceoBot?.model ?: "auto",
+            maxTokens = 2000,
+            onStatus = onStatusUpdate,
+        )
+
+        if (!res.ok) {
+            ceoBot?.let { db.updateBotStatus(it.id, "idle", "Error") }
+            db.insertMessage(
+                ChatMessageItem(
+                    "msg_${UUID.randomUUID().toString().take(10)}",
+                    comp.id,
+                    "bot",
+                    botId = ceoBot?.id,
+                    botName = "CEO",
+                    content = "⚠️ Antigravity CLI n'a pas pu répondre (${res.provider}) : ${res.error}",
+                )
+            )
+            return
+        }
+
+        db.addTokensUsed(comp.id, res.tokensUsed)
+        val maybeJson = llm.extractJsonObject(res.content)
+        if (maybeJson != null && maybeJson.optString("action").equals("run_mission", ignoreCase = true)) {
+            val ceoReply = maybeJson.optString("ceo_reply").trim()
+            if (ceoReply.isNotBlank()) {
+                db.insertMessage(
+                    ChatMessageItem(
+                        "msg_${UUID.randomUUID().toString().take(10)}",
+                        comp.id,
+                        "bot",
+                        botId = ceoBot?.id,
+                        botName = "CEO",
+                        content = ceoReply,
+                    )
+                )
+            }
+            val mTitle = maybeJson.optString("title").ifBlank { userPrompt.take(58) }
+            val mGoal = maybeJson.optString("goal").ifBlank { userPrompt }
+            runFullMission(comp, bots, title = mTitle, goal = mGoal, onStatusUpdate = onStatusUpdate)
+        } else {
+            ceoBot?.let { db.updateBotStatus(it.id, "idle", res.content.take(48)) }
+            db.insertMessage(
+                ChatMessageItem(
+                    "msg_${UUID.randomUUID().toString().take(10)}",
+                    comp.id,
+                    "bot",
+                    botId = ceoBot?.id,
+                    botName = "CEO",
+                    content = res.content,
+                )
+            )
+        }
+    }
+
+    private suspend fun runDirectBotChat(
+        comp: CompanyItem,
+        bot: BotItem,
+        userText: String,
+        onStatusUpdate: suspend (String) -> Unit = {},
+    ): String {
+        if (!hasActiveEngine()) {
+            return "⚠️ Antigravity CLI non connecté et aucune clé API configurée. Ouvre ⚙️ Settings pour installer `agy` / connecter Google."
+        }
+        val mem = db.recallNotes(comp.id, 6).joinToString("\n")
+        val files = sandbox.listFiles(comp.id).joinToString(", ") { "${it.first} (${it.second}B)" }
+        val recentChat = db.listMessages(comp.id)
+            .takeLast(6)
+            .joinToString("\n") { m ->
+                val who = if (m.senderType == "human") "Founder" else m.botName.ifBlank { "CEO" }
+                "$who: ${m.content.take(300)}"
+            }
+        val res = runAiCompletion(
+            systemPrompt = "You are ${bot.name} (${bot.role}) at '${comp.name}'. Instructions: ${bot.systemPrompt}\nSandbox files: ${files.ifBlank { "none" }}\nCompany memory:\n$mem\nReply in the user's language with genuine reasoning.",
+            userPrompt = if (recentChat.isBlank()) userText else "Recent conversation:\n$recentChat\n\nFounder message:\n$userText",
             sandboxDir = sandbox.companyRoot(comp.id),
             modelSpec = bot.model,
-            maxTokens = 1200,
+            maxTokens = 1600,
+            onStatus = onStatusUpdate,
         )
         if (res.ok) {
             db.addTokensUsed(comp.id, res.tokensUsed)
             return res.content
         }
-        return if (res.isOffline) {
-            "No AI engine active yet. Open Settings (gear icon) to sign into Antigravity CLI with Google or save an LLM API key."
-        } else {
-            "AI error: ${res.error}"
-        }
+        return "⚠️ Erreur IA (${res.provider}): ${res.error}"
     }
 
     private suspend fun runFullMission(

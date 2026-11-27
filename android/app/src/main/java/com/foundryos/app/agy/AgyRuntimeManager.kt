@@ -489,19 +489,17 @@ class AgyRuntimeManager(private val context: Context) {
             if (accounts.readLiveToken() == null) return@withContext false to "Not signed in to Google on Antigravity"
 
             sandboxDir.mkdirs()
+            val chosenModel = modelId.ifBlank { selectedModel }
             val cmd = mutableListOf(
                 installer.agyBinary().absolutePath,
                 "-p",
                 prompt,
                 "--output-format",
                 "stream-json",
-                "--mode",
-                "auto",
                 "--dangerously-skip-permissions",
                 "--add-dir",
                 sandboxDir.absolutePath,
             )
-            val chosenModel = modelId.ifBlank { selectedModel }
             if (chosenModel.isNotBlank() && chosenModel != "auto") {
                 cmd.add("--model")
                 cmd.add(chosenModel)
@@ -517,47 +515,95 @@ class AgyRuntimeManager(private val context: Context) {
                 put("AGY_CLI_DISABLE_AUTO_UPDATE", "1")
             }
 
-            val finalText = StringBuilder()
-            var lastAssistantMsg = ""
+            val streamedResponse = StringBuilder()
+            val nonJsonFallback = StringBuilder()
+            var finalResultResponse = ""
+            var resultStatus = ""
+            var resultError = ""
             try {
                 val proc = pb.start()
                 activeRunProcess = proc
-                val errFuture = scope.launch {
-                    runCatching { proc.errorStream.bufferedReader().readText() }
+                val errBuffer = StringBuilder()
+                val errJob = scope.launch {
+                    runCatching {
+                        proc.errorStream.bufferedReader().forEachLine { errLine ->
+                            errBuffer.append(errLine).append('\n')
+                        }
+                    }
                 }
+
+                onStatus("CEO thinking (${chosenModel.ifBlank { "agy" }})...")
 
                 proc.inputStream.bufferedReader().forEachLine { rawLine ->
                     val line = rawLine.trim()
                     if (line.isBlank()) return@forEachLine
+                    if (line.startsWith("warning:", ignoreCase = true)) {
+                        addLog(line)
+                        return@forEachLine
+                    }
                     val obj = runCatching { JSONObject(line) }.getOrNull()
                     if (obj != null) {
-                        val type = obj.optString("type").lowercase()
-                        val text = obj.optString("text").ifBlank { obj.optString("content") }
-                            .ifBlank { obj.optString("result") }
-                        when {
-                            type.contains("tool") -> {
-                                val toolName = obj.optString("name", obj.optString("tool", "working"))
-                                scope.launch { onStatus("agy: $toolName...") }
+                        when (obj.optString("event").lowercase()) {
+                            "step_update" -> {
+                                val su = obj.optJSONObject("step_update")
+                                val stepType = su?.optString("step_type").orEmpty().lowercase()
+                                val textDelta = su?.optString("text_delta").orEmpty()
+                                val thinkingDelta = su?.optString("thinking_delta").orEmpty()
+                                if (stepType.contains("think") || thinkingDelta.isNotBlank()) {
+                                    scope.launch { onStatus("CEO reasoning via agy...") }
+                                } else if (stepType.contains("tool")) {
+                                    val tName = su?.optString("tool_name").orEmpty()
+                                        .ifBlank { su?.optString("name").orEmpty() }
+                                        .ifBlank { stepType }
+                                    scope.launch { onStatus("agy: $tName...") }
+                                } else if (stepType == "agent_response" && textDelta.isNotBlank()) {
+                                    streamedResponse.append(textDelta)
+                                }
                             }
-                            type == "result" && text.isNotBlank() -> {
-                                lastAssistantMsg = text
+                            "result" -> {
+                                val r = obj.optJSONObject("result")
+                                if (r != null) {
+                                    resultStatus = r.optString("status")
+                                    resultError = r.optString("error")
+                                    val respText = r.optString("response")
+                                    if (respText.isNotBlank()) {
+                                        finalResultResponse = respText
+                                    }
+                                }
                             }
-                            text.isNotBlank() -> {
-                                finalText.append(text)
-                                lastAssistantMsg = finalText.toString()
+                            else -> {
+                                val legacyType = obj.optString("type").lowercase()
+                                val legacyText = obj.optString("text").ifBlank { obj.optString("content") }
+                                    .ifBlank { obj.optString("result") }
+                                if (legacyType.contains("tool")) {
+                                    scope.launch { onStatus("agy: ${obj.optString("name", "working")}...") }
+                                } else if (legacyText.isNotBlank()) {
+                                    streamedResponse.append(legacyText)
+                                }
                             }
                         }
-                    } else {
-                        finalText.append(line).append('\n')
+                    } else if (!line.startsWith("{\"event\"")) {
+                        nonJsonFallback.append(line).append('\n')
                     }
                 }
 
                 val code = proc.waitFor()
-                errFuture.cancel()
+                runCatching { errJob.join() }
                 activeRunProcess = null
-                val outStr = lastAssistantMsg.ifBlank { finalText.toString() }.trim()
-                if (code == 0 || outStr.isNotBlank()) true to outStr
-                else false to "agy exited with code $code"
+
+                val answer = finalResultResponse
+                    .ifBlank { streamedResponse.toString() }
+                    .ifBlank { nonJsonFallback.toString() }
+                    .trim()
+                val errText = errBuffer.toString().trim()
+
+                if (resultStatus.equals("ERROR", ignoreCase = true)) {
+                    false to resultError.ifBlank { answer }.ifBlank { errText }.ifBlank { "Antigravity CLI error" }
+                } else if (answer.isNotBlank()) {
+                    true to answer
+                } else {
+                    false to (errText.ifBlank { "agy exited with code $code (empty output)" })
+                }
             } catch (e: Exception) {
                 activeRunProcess = null
                 false to (e.message ?: "agy execution failed")

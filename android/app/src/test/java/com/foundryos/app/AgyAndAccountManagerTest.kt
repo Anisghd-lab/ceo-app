@@ -68,7 +68,7 @@ class AgyAndAccountManagerTest {
     @Test
     fun accountManager_savesAccountsStripsWriterIdAndMirrorsDualKeys() {
         val installer = AgyCliInstaller(context)
-        val mgr = AgyAccountManager(context, installer)
+        val mgr = AgyAccountManager(installer.homeDir())
 
         val authDir = File(installer.homeDir(), ".config/agy-auth").apply { mkdirs() }
         val agyCliDir = File(installer.homeDir(), ".config/antigravity-cli").apply { mkdirs() }
@@ -81,21 +81,21 @@ class AgyAndAccountManagerTest {
         assertTrue("antigravity-oauth-token mirror must exist", mirroredCli.exists())
         assertTrue(mirroredCli.readText().contains("tok_alpha"))
 
-        val saved1 = mgr.captureAndSaveCurrent()
-        assertNotNull(saved1)
-        assertEquals("alpha@example.com", saved1?.email)
-        val snapshot1Text = mgr.listAccounts().first { it.id == saved1!!.id }
-        assertNotNull(snapshot1Text)
+        val (saved1Ok, _) = mgr.saveCurrentAccount()
+        assertTrue(saved1Ok)
+        val accountsAfter1 = mgr.listSavedAccounts()
+        assertTrue(accountsAfter1.any { it.email == "alpha@example.com" })
 
         // Add second account and ensure switching back restores first cleanly without writer_id collisions
         File(authDir, "jetski-standalone-oauth-token").writeText(
             """{"refresh_token":"tok_beta","email":"beta@example.com","name":"Beta User"}"""
         )
-        val saved2 = mgr.captureAndSaveCurrent()
-        assertNotNull(saved2)
-        assertEquals(2, mgr.listAccounts().size)
+        val (saved2Ok, _) = mgr.saveCurrentAccount()
+        assertTrue(saved2Ok)
+        assertEquals(2, mgr.listSavedAccounts().size)
 
-        assertTrue(mgr.switchToAccount(saved1!!.id))
+        val (switchOk, _) = mgr.switchToAccount("alpha@example.com")
+        assertTrue(switchOk)
         val liveText = File(authDir, "jetski-standalone-oauth-token").readText()
         assertTrue(liveText.contains("tok_alpha"))
         assertFalse("writer_id must be stripped from switched snapshots", liveText.contains("writer_id"))

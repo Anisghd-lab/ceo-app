@@ -103,7 +103,7 @@ class PluginSystemTest {
 
     @Test
     fun writeToolsRequireApproval_andApprovedCallHitsRemoteApi() = runTest {
-        auth.saveManualToken("github", "ghp_test_token_123", "octocat")
+        auth.saveToken("github", "ghp_test_token_123", accountLabel = "octocat")
         executor.apiBaseOverrides["github"] = server.url("").toString().trimEnd('/')
 
         // Stage without approval -> must pause & require approval without hitting HTTP

@@ -65,7 +65,7 @@ class AutonomousBotsEndToEndTest {
         pluginExec.apiBaseOverrides["ddg_instant"] = "$pBase/ddg"
         pluginExec.apiBaseOverrides["hn_algolia"] = "$pBase/hn"
         pluginExec.apiBaseOverrides["github"] = "$pBase/github"
-        auth.saveManualToken("github", "ghp_mock_bot_token", "founder-gh")
+        auth.saveToken("github", "ghp_mock_bot_token", accountLabel = "founder-gh")
 
         engine = AutonomousEngine(
             context = context,
@@ -157,7 +157,7 @@ class AutonomousBotsEndToEndTest {
             )
         )
         val proposal = engine.proposeCompany("SEO agency")
-        val deployed = engine.deployCompany(proposal, "SEO agency")
+        val deployed = engine.deployCompany("SEO agency", proposal)
 
         // Enqueue deterministic ReAct sequence for handleFounderMessage -> full multi-bot mission:
         // 1) CEO decides to launch full mission with bespoke per-bot mandates aligned to objective & roles
@@ -205,22 +205,22 @@ class AutonomousBotsEndToEndTest {
         val telemetry = engine.botTelemetry.value
         val strategistTel = telemetry.values.firstOrNull { it.botName == "Strategist" }
         assertNotNull("Strategist telemetry missing", strategistTel)
-        assertTrue("Strategist should record browser_search trace", strategistTel!!.recentTraces.any { it.tool == "browser_search" && it.success })
+        assertTrue("Strategist should record browser_search trace", strategistTel!!.traces.any { it.tool == "browser_search" && it.ok })
 
         val builderTel = telemetry.values.firstOrNull { it.botName == "Builder" }
         assertNotNull("Builder telemetry missing", builderTel)
-        assertTrue("Builder should record github_list_repos trace", builderTel!!.recentTraces.any { it.tool == "github_list_repos" && it.success })
-        assertTrue("Builder should record https://github.com URL", builderTel.recentTraces.any { it.url == "https://github.com" })
+        assertTrue("Builder should record github_list_repos trace", builderTel!!.traces.any { it.tool == "github_list_repos" && it.ok })
+        assertTrue("Builder should record https://github.com URL", builderTel.traces.any { it.url == "https://github.com" })
 
         val publisherTel = telemetry.values.firstOrNull { it.botName == "Publisher" }
         assertNotNull("Publisher telemetry missing", publisherTel)
-        assertTrue("Publisher should record product_design_prototype trace", publisherTel!!.recentTraces.any { it.tool == "product_design_prototype" && it.success })
+        assertTrue("Publisher should record product_design_prototype trace", publisherTel!!.traces.any { it.tool == "product_design_prototype" && it.ok })
 
         // Verify real deliverable files + Human Approval Gate + idempotency
         assertTrue(sandbox.resolveFile(deployed.id, "output/q4_seo_audit.pdf").exists())
         assertTrue(sandbox.resolveFile(deployed.id, "output/seo_dashboard.html").exists())
 
-        val approvals = db.listApprovals(deployed.id)
+        val approvals = msgs.mapNotNull { it.approval }
         assertEquals(1, approvals.size)
         val shipApr = approvals.first()
         assertEquals("PENDING", shipApr.status)

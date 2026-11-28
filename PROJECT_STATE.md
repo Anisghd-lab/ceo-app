@@ -29,6 +29,9 @@
 - [x] **Backend Python (`backend/`)** : 5/5 tests `pytest` verts.
 - [x] **FreeLLMAPI (`freellmapi`) + Pool Modèles Gratuits (`v0.7.0`)** :
   - Fournisseur natif `freellmapi` avec URL de passerelle configurable (défaut `http://127.0.0.1:3001`), jeton Bearer optionnel en local, filtre automatique sur `available == true`, badge `FREE`, épingle `auto` / `fusion` et activation automatique du routeur gratuit.
+- [x] **Moteur PDF Livre Éditorial Illustré & Rédaction Complète Anti-Fallback (`v0.9.1`)** :
+  - `PdfBookRenderer.kt` + `OnDeviceSandbox.kt` : rendu natif Android `PdfDocument`/`Canvas` de livres & workbooks complets (couverture pleine page thématisée avec visuels vectoriels, Sommaire automatique, en-têtes de chapitres numérotés, Markdown complet avec gras/tableaux/citations/cases à cocher imprimables `- [ ]`/lignes d'exercice, diagrammes et graphiques vectoriels intégrés `bar_chart`, `roadmap`, `habit_tracker`, `kpi_grid`, `framework`, `checklist_card`, en-têtes/pieds de page numérotés).
+  - `AutonomousEngine.kt` + `AgyRuntimeManager.kt` : timeout Producteur porté à `240s`, `maxTokens = 8192`, interdiction stricte de recopier le brief de mission, récolte systématique des fichiers créés sur disque, conversion automatique du Markdown brut en livre illustré, et synthèse IA directe multi-chapitres (`synthesizeAiBookPdf`) en cas de timeout au lieu du PDF de secours générique.
 - [x] **Choix Interactifs en 1 Clic, Réponses Concises & Contrôles ChatGPT (`v0.9.0`)** :
   - `ChoiceExtractor.kt` + `AutonomousEngine.kt` : réponses normales brèves et directes (2–4 phrases) + protocole structuré `{"action":"choices","reply":"...","choices":[...]}` (et détection automatique sécurisée sur les questions à options numérotées/lettrées).
   - `InteractiveChoicesCard` (`VideoCards.kt`) : cartes d'options cliquables en un tap (cibles tactiles Android ≥ 48dp, sélection persistée en SQLite avec badge `Choisi`, envoi automatique du choix au CEO).

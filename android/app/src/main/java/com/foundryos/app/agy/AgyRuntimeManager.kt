@@ -521,7 +521,7 @@ class AgyRuntimeManager(private val context: Context) {
         sandboxDir: File,
         prompt: String,
         modelId: String = selectedModel,
-        timeoutMs: Long = 120_000L,
+        timeoutMs: Long = 240_000L,
         onStatus: suspend (String) -> Unit = {},
         onThinkingDelta: suspend (String) -> Unit = {},
     ): Pair<Boolean, String> = runMutex.withLock {

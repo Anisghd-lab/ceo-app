@@ -771,4 +771,170 @@ class AutonomousBotsEndToEndTest {
         assertEquals("Donne plutôt 2 actions prioritaires.", afterEdit[0].content)
         assertEquals("Réponse adaptée au message modifié.", afterEdit[1].content)
     }
+
+    @Test
+    fun illustratedBookPdf_rendersMultiChapterBookWithVisualsAndMarkdown() = runTest {
+        val cid = "cmp_book_pdf"
+        db.insertCompany(
+            com.foundryos.app.data.CompanyItem(
+                id = cid,
+                name = "ResetPress",
+                description = "Publish illustrated 2027 digital books and workbooks",
+                missionStatement = "Deliver complete titled and illustrated ebooks",
+                status = "ACTIVE",
+                botsCount = 3,
+            )
+        )
+        db.insertBot(
+            com.foundryos.app.data.BotItem(
+                id = "b_ceo_book", companyId = cid, name = "CEO", role = "CEO", tagline = "CEO",
+                systemPrompt = "Lead ResetPress", isCeo = true,
+            )
+        )
+        db.insertBot(
+            com.foundryos.app.data.BotItem(
+                id = "b_creator_book", companyId = cid, name = "AuthorBot", role = "Book Producer", tagline = "Writes illustrated books",
+                systemPrompt = "Author complete books with chapters and illustrations",
+                allowedTools = listOf("create_pdf", "create_zip", "sandbox_files"),
+            )
+        )
+        db.insertBot(
+            com.foundryos.app.data.BotItem(
+                id = "b_qa_book", companyId = cid, name = "QualityAuditor", role = "QA", tagline = "Audits books",
+                systemPrompt = "Audit book quality", isQa = true,
+            )
+        )
+
+        // CEO launches mission -> AuthorBot produces rich multi-chapter illustrated book PDF -> QA approves
+        aiServer.enqueue(openAiWrap("""{"action":"run_mission","title":"The 2027 Reset Bundle","goal":"Write a complete illustrated 2027 Life, Goals & Finance Reset Book","ceo_reply":"Lancement de la rédaction du livre illustré."}"""))
+        aiServer.enqueue(
+            openAiWrap(
+                """{
+                  "action": "tool",
+                  "tool": "create_pdf",
+                  "args": {
+                    "filename": "2027_life_finance_reset_book.pdf",
+                    "title": "The 2027 Life, Goals & Finance Reset",
+                    "subtitle": "A Complete Illustrated Workbook & Action Guide",
+                    "author": "ResetPress Studio",
+                    "edition_badge": "2027 COMPLETE EDITION",
+                    "theme": "wellness",
+                    "highlights": ["2026 Closure Audit", "Quarterly Goal System", "Zero-Based Budget", "90-Day Habit Tracker"],
+                    "chapters": [
+                      {
+                        "heading": "2026 Year-End Closure Audit",
+                        "summary": "Review wins, lessons, and energy drains before designing 2027.",
+                        "body": "### Reflection Framework\nBefore building a new year, close open loops with honesty.\n\n- [ ] List your top 5 wins from 2026\n- [ ] Cancel unused subscriptions\n- [ ] Archive unfinished clutter\n\n> Clarity comes from subtracting noise before adding new goals.\n\n| Pillar | 2026 Score | 2027 Target |\n| --- | --- | --- |\n| Health | 6/10 | 9/10 |\n| Finance | 7/10 | 9/10 |\n\n___",
+                        "illustration": {
+                          "type": "bar_chart",
+                          "title": "Life Balance Snapshot",
+                          "items": [
+                            {"label": "Career & Craft", "value": 82, "detail": "82%"},
+                            {"label": "Savings Rate", "value": 65, "detail": "65%"},
+                            {"label": "Daily Energy", "value": 90, "detail": "90%"}
+                          ]
+                        }
+                      },
+                      {
+                        "heading": "90-Day Habit & Vision Blueprint",
+                        "summary": "Turn annual ambitions into simple weekly rituals.",
+                        "body": "### Weekly Execution Cadence\n- **Monday**: Review top 3 weekly outcomes\n- **Wednesday**: Mid-week budget & habit check\n- **Sunday**: 20-minute reset\n\n- [ ] Morning focus block (60 min)\n- [ ] Daily movement (30 min)\n- [ ] Expense log (5 min)",
+                        "illustration": {
+                          "type": "habit_tracker",
+                          "title": "Core 90-Day Habits",
+                          "items": [
+                            {"label": "Deep Work 60m"},
+                            {"label": "Walk / Exercise 30m"},
+                            {"label": "Zero-Spend Check"}
+                          ]
+                        }
+                      }
+                    ]
+                  }
+                }""".trimIndent()
+            )
+        )
+        aiServer.enqueue(openAiWrap("""{"action":"final","summary":"Illustrated book ready.","primary_rel_path":"output/2027_life_finance_reset_book.pdf"}"""))
+        aiServer.enqueue(openAiWrap("""{"passed":true,"score":97,"report":"Complete titled & illustrated book verified."}"""))
+
+        engine.handleFounderMessage(cid, "Crée le livre complet illustré 2027 Reset Bundle")
+
+        val pdfFile = sandbox.resolveFile(cid, "output/2027_life_finance_reset_book.pdf")
+        assertTrue("Illustrated book PDF must exist", pdfFile.exists())
+        assertTrue("PDF must be non-empty valid PDF", pdfFile.length() > 500)
+        val header = String(pdfFile.readBytes().copyOfRange(0, 5), Charsets.US_ASCII)
+        assertEquals("%PDF-", header)
+
+        val art = db.listArtifacts(cid).firstOrNull { it.filename == "2027_life_finance_reset_book.pdf" }
+        assertNotNull("Artifact must be registered in DB", art)
+        assertTrue("Artifact summary must mention chapters & theme", art!!.summary.contains("2 chapters") && art.summary.contains("wellness"))
+        assertEquals(97, art.qaScore)
+
+        // Also verify Markdown-to-Book parser extracts multi-chapter structure + auto illustrations
+        val mdBook = com.foundryos.app.engine.PdfBookRenderer.parseMarkdownIntoBook(
+            title = "Markdown Ebook",
+            subtitle = "Auto-illustrated",
+            author = "ResetPress",
+            markdown = "# Chapter 1: Budget System\n- Savings: 30%\n- Investing: 20%\n- Essentials: 50%\n\n## Chapter 2: Action Steps\n1. Audit expenses — cut leaks\n2. Automate transfers — pay yourself first\n3. Review monthly — adjust targets",
+        )
+        assertEquals(2, mdBook.chapters.size)
+        assertEquals("bar_chart", mdBook.chapters[0].illustration?.type)
+        assertEquals("roadmap", mdBook.chapters[1].illustration?.type)
+    }
+
+    @Test
+    fun producerTimeout_recoversWithAiBookSynthesisInsteadOfBriefDump() = runTest {
+        val cid = "cmp_timeout_book"
+        db.insertCompany(
+            com.foundryos.app.data.CompanyItem(
+                id = cid,
+                name = "BookFlow",
+                description = "Author complete books even after step timeout",
+                missionStatement = "Never ship a raw brief dump when AI engine is active",
+                status = "ACTIVE",
+                botsCount = 3,
+            )
+        )
+        db.insertBot(
+            com.foundryos.app.data.BotItem(
+                id = "b_ceo_tb", companyId = cid, name = "CEO", role = "CEO", tagline = "CEO",
+                systemPrompt = "Lead BookFlow", isCeo = true,
+            )
+        )
+        db.insertBot(
+            com.foundryos.app.data.BotItem(
+                id = "b_prod_tb", companyId = cid, name = "BookMaker", role = "Core Builder", tagline = "Builds books",
+                systemPrompt = "Write complete books", allowedTools = listOf("create_pdf"),
+            )
+        )
+        db.insertBot(
+            com.foundryos.app.data.BotItem(
+                id = "b_qa_tb", companyId = cid, name = "QualityAuditor", role = "QA", tagline = "QA",
+                systemPrompt = "Audit", isQa = true,
+            )
+        )
+
+        engine.botStepTimeoutMs = 900L
+        aiServer.enqueue(openAiWrap("""{"action":"run_mission","title":"2027 Reset Guide","goal":"Write a complete English reset workbook","ceo_reply":"Démarrage."}"""))
+        // Producer stalls > 900ms on first loop
+        aiServer.enqueue(openAiWrap("""{"action":"final","summary":"too late"}""").setBodyDelay(1700, java.util.concurrent.TimeUnit.MILLISECONDS))
+        // CEO interrogation after timeout
+        aiServer.enqueue(openAiWrap("""BookMaker a dépassé le délai ; synthèse directe du livre illustré lancée."""))
+        // Direct AI Book Synthesis recovery call produces a real multi-chapter book!
+        aiServer.enqueue(
+            openAiWrap(
+                """{"title":"2027 Reset Guide","subtitle":"Complete Illustrated Edition","theme":"executive","chapters":[{"heading":"Chapter 1: Mindset Reset","body":"Full original chapter content with **actionable steps**.\n- [ ] Clear desk\n- [ ] Write top 3 priorities"},{"heading":"Chapter 2: Financial Reset","body":"Zero-based budget table:\n| Category | % |\n| --- | --- |\n| Needs | 50% |\n| Savings | 30% |"}]}"""
+            )
+        )
+        // QA validates synthesized book
+        aiServer.enqueue(openAiWrap("""{"passed":true,"score":94,"report":"Recovered illustrated book verified."}"""))
+
+        engine.handleFounderMessage(cid, "Crée le guide 2027 Reset")
+
+        val arts = db.listArtifacts(cid)
+        assertTrue("AI-authored recovery book must be created", arts.any { it.summary.contains("2 chapters") })
+        val pdfFile = sandbox.resolveFile(cid, arts.first().relPath)
+        val rawAscii = String(pdfFile.readBytes(), Charsets.ISO_8859_1)
+        assertFalse("Must NOT contain offline API key placeholder when AI is active", rawAscii.contains("Add an LLM API key"))
+    }
 }

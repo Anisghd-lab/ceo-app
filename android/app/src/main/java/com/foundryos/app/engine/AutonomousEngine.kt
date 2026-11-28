@@ -65,7 +65,7 @@ class AutonomousEngine(
     var runCancelled: Boolean = false
         private set
 
-    internal var botStepTimeoutMs: Long = 75_000L
+    internal var botStepTimeoutMs: Long = 180_000L
 
     @Volatile
     private var currentMissionCompanyId: String? = null
@@ -259,7 +259,7 @@ class AutonomousEngine(
                 obsList.add("[$t] -> $obs")
             }
         } else {
-            val t = parsed.optString("tool").ifBlank { if (parsed.has("sections")) "create_pdf" else "" }
+            val t = parsed.optString("tool").ifBlank { if (parsed.has("chapters") || parsed.has("sections")) "create_pdf" else "" }
             if (t.isNotBlank()) {
                 val a = parsed.optJSONObject("args") ?: JSONObject()
                 onStatusUpdate("${bot.name} running $t...")
@@ -1442,7 +1442,12 @@ class AutonomousEngine(
             }
 
             // Executes any bot under a watchdog timeout + CEO interrogation + clean Stop/Resume checkpointing
-            suspend fun <T> runGuardedBotStep(bot: BotItem, stepLabel: String, block: suspend () -> T): Pair<Boolean, T?> {
+            suspend fun <T> runGuardedBotStep(
+                bot: BotItem,
+                stepLabel: String,
+                customTimeoutMs: Long = botStepTimeoutMs,
+                block: suspend () -> T,
+            ): Pair<Boolean, T?> {
                 if (bot.id in completedIds) return true to null
                 if (bot.id == interruptedTargetId) {
                     interruptedTargetId = null
@@ -1462,7 +1467,7 @@ class AutonomousEngine(
                 currentRunningBotId = bot.id
                 persistCkpt(bot.id)
 
-                val timedResult = withWallTimeoutOrNull(botStepTimeoutMs) { block() }
+                val timedResult = withWallTimeoutOrNull(customTimeoutMs) { block() }
                 currentRunningBotId = null
 
                 if (runCancelled || killSwitch) {
@@ -1489,7 +1494,7 @@ class AutonomousEngine(
                         comp = comp,
                         ceoBot = ceoBot,
                         stalledBot = bot,
-                        reason = "Délai dépassé (${botStepTimeoutMs / 1000}s) sur $stepLabel",
+                        reason = "Délai dépassé (${customTimeoutMs / 1000}s) sur $stepLabel",
                         onStatusUpdate = onStatusUpdate,
                     )
                     completedIds.add(bot.id)
@@ -1548,15 +1553,26 @@ class AutonomousEngine(
 
             // Stage 2a: Primary Producer Bot builds core deliverable(s)
             var createdArtifacts = db.listArtifacts(comp.id).filter { it.botName == producerBot.name }.toMutableList()
-            val (prodOk, prodBuilt) = runGuardedBotStep(producerBot, "Production ($title)") {
-                onStatusUpdate("${producerBot.name} is building in sandbox...")
+            val seenOutBeforeProducer = sandbox.listOutputFiles(comp.id).map { it.name }.toMutableSet()
+            val producerWasInterrupted = producerBot.id == interruptedTargetId
+            val producerTimeout = if (botStepTimeoutMs >= 10_000L) maxOf(botStepTimeoutMs, 240_000L) else botStepTimeoutMs
+            val (prodOk, prodBuilt) = runGuardedBotStep(
+                bot = producerBot,
+                stepLabel = "Production ($title)",
+                customTimeoutMs = producerTimeout,
+            ) {
+                onStatusUpdate("${producerBot.name} is authoring complete deliverables in sandbox...")
                 recordBotActivity(producerBot, "working", task = "Building deliverables: $title")
-                db.updateBotStatus(producerBot.id, "working", "Building deliverable...")
+                db.updateBotStatus(producerBot.id, "working", "Authoring book & deliverables...")
                 runProducerAgentLoop(comp, producerBot, missionId, title, goal, scopedSpec, onStatusUpdate)
             }
             if (!prodOk) return
-            if (prodBuilt != null) {
-                createdArtifacts = prodBuilt.toMutableList()
+            val diskAfterProducer = harvestNativeCliArtifacts(comp.id, producerBot.name, seenOutBeforeProducer)
+            if (prodBuilt != null || diskAfterProducer.isNotEmpty()) {
+                val merged = ((prodBuilt ?: emptyList()) + diskAfterProducer).distinctBy { it.relPath }
+                if (merged.isNotEmpty()) {
+                    createdArtifacts = merged.toMutableList()
+                }
                 recordBotActivity(producerBot, "idle", task = "Built ${createdArtifacts.size} artifact(s)")
                 db.updateBotStatus(producerBot.id, "idle", "Deliverable ready", incrementUnread = true)
                 appendTeamFeed(comp.id, producerBot.name, "Built ${createdArtifacts.joinToString(", ") { it.filename }}")
@@ -1571,10 +1587,21 @@ class AutonomousEngine(
                     )
                 )
             } else if (createdArtifacts.isEmpty()) {
-                // Guarantee goal completion ("coût que coûte"): synthesize verified PDF from research dossier if Producer timed out/skipped
-                val fallbackArt = buildFallbackPdfArtifact(comp, ceoBot, title, goal, scopedSpec)
-                createdArtifacts.add(fallbackArt)
-                appendTeamFeed(comp.id, "CEO", "Synthesized recovery deliverable ${fallbackArt.filename} to keep mission on track")
+                // If Producer timed out (not explicitly skipped by Founder) and an AI engine is active, run a direct 1-shot illustrated book authoring pass
+                val aiRecovered = if (!producerWasInterrupted && hasActiveEngine() && !runCancelled && !killSwitch) {
+                    val recTimeout = if (botStepTimeoutMs >= 10_000L) maxOf(botStepTimeoutMs, 120_000L) else botStepTimeoutMs
+                    withWallTimeoutOrNull(recTimeout) {
+                        synthesizeAiBookPdf(comp, producerBot, title, goal, scopedSpec, onStatusUpdate)
+                    }
+                } else null
+                if (aiRecovered != null) {
+                    createdArtifacts.add(aiRecovered)
+                    appendTeamFeed(comp.id, producerBot.name, "Authored complete illustrated PDF ${aiRecovered.filename}")
+                } else {
+                    val fallbackArt = buildFallbackPdfArtifact(comp, ceoBot, title, goal, scopedSpec)
+                    createdArtifacts.add(fallbackArt)
+                    appendTeamFeed(comp.id, "CEO", "Synthesized recovery deliverable ${fallbackArt.filename} to keep mission on track")
+                }
             }
             if (runCancelled || killSwitch) return
 
@@ -1852,9 +1879,12 @@ class AutonomousEngine(
 
             You work inside an isolated Android sandbox (${compRoot.absolutePath}).
             ${buildSharedTeamContext(comp.id)}
-            You MUST use real connected plugin tools or sandbox tools directly to research, build, and produce thorough, publish-ready deliverables.
+            CRITICAL AUTHORING RULE:
+            - You are creating REAL, COMPLETE, SELLABLE customer-facing deliverables (full multi-chapter illustrated books, workbooks, planners, interactive HTML pages, SVG graphics, ZIP bundles).
+            - NEVER copy-paste or echo the Mission Brief or Scope as the PDF content! Write original, comprehensive, publication-grade chapters (at least 5 to 8 rich chapters for books/guides/workbooks) with real frameworks, concrete step-by-step instructions, markdown subheadings (###), **bold highlights**, printable checklists (- [ ]), callout quotes (> ...), markdown tables (| Col 1 | Col 2 |), fill-in worksheet lines (___), and an `illustration` vector chart/diagram per chapter.
             Reply strictly with ONE JSON object per step:
-            - Call 1 tool: {"action": "tool", "tool": "create_pdf", "args": {"filename": "${slugify(title)}.pdf", "title": "...", "subtitle": "...", "sections": [{"heading": "...", "body": "..."}]}}
+            - Create a complete illustrated book/workbook PDF:
+              {"action": "tool", "tool": "create_pdf", "args": {"filename": "${slugify(title)}.pdf", "title": "Book Title", "subtitle": "Compelling Subtitle", "author": "${comp.name}", "edition_badge": "COMPLETE EDITION", "theme": "executive|emerald|editorial|minimal|wellness", "highlights": ["Key highlight 1", "Key highlight 2", "Key highlight 3", "Key highlight 4"], "chapters": [{"heading": "Chapter Title", "summary": "1-sentence takeaway", "body": "### Subheading\nRich content with **bold**, - bullets, - [ ] checkboxes, > callouts, | Tables |, and ___ worksheet lines.", "illustration": {"type": "bar_chart|roadmap|kpi_grid|framework|habit_tracker|checklist_card", "title": "Visual Diagram Title", "items": [{"label": "Item", "value": 85, "detail": "85%"}]}}]}}
             - Call multiple tools at once: {"action": "tools", "calls": [{"tool": "...", "args": {...}}]}
               Sandbox tools:
               * "list_files": {}
@@ -1880,7 +1910,7 @@ class AutonomousEngine(
                 sandboxDir = compRoot,
                 modelSpec = bot.model,
                 jsonMode = !canUseAgyEngine(),
-                maxTokens = 3200,
+                maxTokens = 8192,
                 onStatus = onStatusUpdate,
             )
             if (!res.ok) break
@@ -1918,7 +1948,7 @@ class AutonomousEngine(
                     promptHistory.add("Step $step called $chosenTool")
                     promptHistory.add("Observation:\n$obs")
                 }
-                parsed.has("sections") && created.isEmpty() -> {
+                (parsed.has("chapters") || parsed.has("sections")) && created.isEmpty() -> {
                     val (_, art) = executeAnyTool(comp, bot, "create_pdf", parsed.put("filename", "${slugify(title)}.pdf"), onStatusUpdate)
                     if (art != null) {
                         seenOutNames.add(art.filename)
@@ -1932,41 +1962,95 @@ class AutonomousEngine(
 
         if (created.isEmpty() && lastAiText.length > 80 && !killSwitch && !runCancelled) {
             val maybeObj = llm.extractJsonObject(lastAiText)
-            if (maybeObj?.has("sections") == true) {
+            if (maybeObj != null && (maybeObj.has("chapters") || maybeObj.has("sections"))) {
                 executeSandboxTool(comp, bot, "create_pdf", maybeObj.put("filename", "${slugify(title)}.pdf")).second?.let { created.add(it) }
             } else {
-                val file = sandbox.createPdf(
+                val bookSpec = PdfBookRenderer.parseMarkdownIntoBook(
+                    title = title,
+                    subtitle = "${comp.name} · Complete Illustrated Edition",
+                    author = comp.name,
+                    markdown = lastAiText.take(36_000),
+                )
+                val file = sandbox.createIllustratedBookPdf(
                     companyId = comp.id,
                     filename = "${slugify(title)}.pdf",
-                    title = title,
-                    subtitle = "${comp.name} · Generated by ${bot.name}",
-                    sections = listOf("Deliverable" to lastAiText.take(12000)),
+                    spec = bookSpec,
                 )
-                created.add(registerArtifact(comp.id, bot.name, title, file, "PDF deliverable"))
+                created.add(registerArtifact(comp.id, bot.name, title, file, "Illustrated PDF book (${bookSpec.chapters.size} chapters)"))
             }
         }
 
         if (created.isEmpty() && !killSwitch && !runCancelled) {
-            val secRes = runAiCompletion(
-                systemPrompt = "Write high-quality deliverable content as JSON: {\"title\": \"...\", \"subtitle\": \"...\", \"sections\": [{\"heading\": \"...\", \"body\": \"...\"}]} (at least 4 detailed sections).",
-                userPrompt = "Company: ${comp.name}\nGoal: $goal",
-                sandboxDir = compRoot,
-                modelSpec = bot.model,
-                jsonMode = true,
-                maxTokens = 3000,
-            )
-            val obj = if (secRes.ok) llm.extractJsonObject(secRes.content) else null
-            if (obj != null) {
-                db.addTokensUsed(comp.id, secRes.tokensUsed)
-                val toolRes = executeSandboxTool(comp, bot, "create_pdf", obj.put("filename", "${slugify(title)}.pdf"))
-                toolRes.second?.let { created.add(it) }
-            }
+            synthesizeAiBookPdf(comp, bot, title, goal, spec, onStatusUpdate)?.let { created.add(it) }
         }
 
         if (created.isEmpty() && !killSwitch && !runCancelled) {
             created.add(buildFallbackPdfArtifact(comp, bot, title, goal, spec))
         }
         return created
+    }
+
+    private suspend fun synthesizeAiBookPdf(
+        comp: CompanyItem,
+        bot: BotItem,
+        title: String,
+        goal: String,
+        spec: String,
+        onStatusUpdate: suspend (String) -> Unit = {},
+    ): ArtifactItem? {
+        onStatusUpdate("${bot.name} authoring illustrated PDF book...")
+        val secRes = runAiCompletion(
+            systemPrompt = """
+                You are a bestselling book & workbook author at '${comp.name}'.
+                Author a COMPLETE, SELLABLE, ILLUSTRATED publication in valid JSON ONLY (no markdown outside JSON).
+                NEVER repeat or copy the mission brief. Write real, original, actionable chapters for the end reader in the target language requested by the goal.
+                Required JSON schema:
+                {
+                  "title": "Publication Title",
+                  "subtitle": "Compelling subtitle",
+                  "author": "${comp.name}",
+                  "edition_badge": "COMPLETE EDITION",
+                  "theme": "executive|emerald|editorial|minimal|wellness",
+                  "highlights": ["Highlight 1", "Highlight 2", "Highlight 3", "Highlight 4"],
+                  "chapters": [
+                    {
+                      "heading": "Chapter Title",
+                      "summary": "1-sentence chapter summary",
+                      "body": "Full multi-paragraph chapter with ### Subheadings, **bold** emphasis, - bullets, - [ ] printable checkboxes, > callout quotes, | Markdown | Tables |, and ___ worksheet lines.",
+                      "illustration": {
+                        "type": "bar_chart|roadmap|kpi_grid|framework|habit_tracker|checklist_card",
+                        "title": "Diagram title",
+                        "items": [{"label": "Item", "value": 80, "detail": "80%"}]
+                      }
+                    }
+                  ]
+                }
+                Include at least 6 thorough chapters, each with substantial customer-ready content and a relevant illustration.
+            """.trimIndent(),
+            userPrompt = "Title: $title\nCompany: ${comp.name}\nGoal & Requirements:\n$goal\n\nResearch Context:\n${spec.take(3500)}",
+            sandboxDir = sandbox.companyRoot(comp.id),
+            modelSpec = bot.model,
+            jsonMode = true,
+            maxTokens = 8192,
+            onStatus = onStatusUpdate,
+        )
+        if (!secRes.ok || secRes.content.isBlank()) return null
+        db.addTokensUsed(comp.id, secRes.tokensUsed)
+        val obj = llm.extractJsonObject(secRes.content)
+        if (obj != null && (obj.has("chapters") || obj.has("sections"))) {
+            return executeSandboxTool(comp, bot, "create_pdf", obj.put("filename", "${slugify(title)}.pdf")).second
+        }
+        if (secRes.content.length > 250) {
+            val bookSpec = PdfBookRenderer.parseMarkdownIntoBook(
+                title = title,
+                subtitle = "${comp.name} · Complete Illustrated Edition",
+                author = comp.name,
+                markdown = secRes.content.take(36_000),
+            )
+            val file = sandbox.createIllustratedBookPdf(comp.id, "${slugify(title)}.pdf", bookSpec)
+            return registerArtifact(comp.id, bot.name, title, file, "Illustrated PDF book (${bookSpec.chapters.size} chapters)")
+        }
+        return null
     }
 
     private suspend fun executeAnyTool(
@@ -2117,19 +2201,85 @@ class AutonomousEngine(
             "create_pdf" -> {
                 val fn = args.optString("filename").ifBlank { "${slugify(comp.name)}.pdf" }
                 val docTitle = args.optString("title").ifBlank { comp.name }
-                val sub = args.optString("subtitle").ifBlank { "Produced by ${bot.name} · ${comp.name}" }
-                val secArr = args.optJSONArray("sections") ?: JSONArray()
-                val sections = mutableListOf<Pair<String, String>>()
-                for (i in 0 until secArr.length()) {
-                    val s = secArr.optJSONObject(i) ?: continue
-                    sections.add(s.optString("heading", "Section ${i + 1}") to s.optString("body", ""))
+                val sub = args.optString("subtitle").ifBlank { "Complete Edition · ${comp.name}" }
+                val author = args.optString("author").ifBlank { comp.name }
+                val editionBadge = args.optString("edition_badge").ifBlank { "COMPLETE EDITION" }
+                val theme = args.optString("theme").ifBlank { PdfBookRenderer.inferTheme(docTitle, sub) }
+                val hlArr = args.optJSONArray("highlights") ?: args.optJSONArray("cover_highlights") ?: JSONArray()
+                val highlights = (0 until hlArr.length()).map { hlArr.optString(it).trim() }.filter { it.isNotBlank() }
+
+                val chapArr = args.optJSONArray("chapters") ?: args.optJSONArray("sections") ?: JSONArray()
+                val chapters = mutableListOf<PdfBookChapter>()
+                for (i in 0 until chapArr.length()) {
+                    val s = chapArr.optJSONObject(i) ?: continue
+                    val heading = s.optString("heading").ifBlank { s.optString("title", "Chapter ${i + 1}") }
+                    val body = s.optString("body").ifBlank { s.optString("content", "") }
+                    val summary = s.optString("summary").trim()
+                    val visObj = s.optJSONObject("illustration") ?: s.optJSONObject("visual") ?: s.optJSONObject("chart")
+                    val illustration = if (visObj != null) {
+                        val itemsArr = visObj.optJSONArray("items") ?: JSONArray()
+                        val visItems = (0 until itemsArr.length()).mapNotNull { j ->
+                            val itObj = itemsArr.optJSONObject(j)
+                            if (itObj != null) {
+                                val lbl = itObj.optString("label").ifBlank { itObj.optString("name") }.trim()
+                                if (lbl.isBlank()) null
+                                else PdfVisualItem(
+                                    label = lbl,
+                                    value = itObj.optDouble("value", 0.0).toFloat(),
+                                    detail = itObj.optString("detail").ifBlank { itObj.optString("text") }.trim(),
+                                )
+                            } else {
+                                val str = itemsArr.optString(j).trim()
+                                if (str.isBlank()) null else PdfVisualItem(label = str)
+                            }
+                        }
+                        if (visItems.isNotEmpty()) {
+                            PdfIllustrationSpec(
+                                type = visObj.optString("type", "framework"),
+                                title = visObj.optString("title", "$heading — Visual"),
+                                items = visItems,
+                            )
+                        } else null
+                    } else {
+                        PdfBookRenderer.autoSynthesizeIllustration(heading, body)
+                    }
+                    chapters.add(
+                        PdfBookChapter(
+                            heading = heading,
+                            body = body,
+                            summary = summary,
+                            illustration = illustration,
+                        )
+                    )
                 }
-                if (sections.isEmpty()) {
-                    sections.add("Overview" to args.optString("content", comp.description))
+                if (chapters.isEmpty()) {
+                    val rawContent = args.optString("content", comp.description)
+                    val parsedBook = PdfBookRenderer.parseMarkdownIntoBook(docTitle, sub, author, rawContent, theme)
+                    chapters.addAll(parsedBook.chapters)
                 }
-                val file = sandbox.createPdf(comp.id, fn, docTitle, sub, sections)
-                val art = registerArtifact(comp.id, bot.name, docTitle, file, "PDF deliverable (${sections.size} sections)")
-                JSONObject().put("ok", true).put("rel_path", art.relPath).put("bytes", art.sizeBytes).toString() to art
+                val bookSpec = PdfBookSpec(
+                    title = docTitle,
+                    subtitle = sub,
+                    author = author,
+                    editionBadge = editionBadge,
+                    theme = theme,
+                    highlights = highlights.ifEmpty { chapters.take(4).map { it.heading } },
+                    chapters = chapters,
+                )
+                val file = sandbox.createIllustratedBookPdf(comp.id, fn, bookSpec)
+                val art = registerArtifact(
+                    comp.id,
+                    bot.name,
+                    docTitle,
+                    file,
+                    "Illustrated PDF book (${chapters.size} chapters, ${theme} theme)",
+                )
+                JSONObject()
+                    .put("ok", true)
+                    .put("rel_path", art.relPath)
+                    .put("bytes", art.sizeBytes)
+                    .put("chapters", chapters.size)
+                    .toString() to art
             }
             "list_files" -> {
                 val files = sandbox.listFiles(comp.id).joinToString("\n") { "${it.first} (${it.second} bytes)" }
@@ -2152,7 +2302,12 @@ class AutonomousEngine(
             "create_zip" -> {
                 val zName = args.optString("zip_filename").ifBlank { "${slugify(comp.name)}_pack.zip" }
                 val arr = args.optJSONArray("rel_paths") ?: JSONArray()
-                val paths = (0 until arr.length()).map { arr.optString(it) }
+                val requestedPaths = (0 until arr.length()).map { arr.optString(it) }.filter { it.isNotBlank() }
+                val paths = requestedPaths.ifEmpty {
+                    sandbox.listOutputFiles(comp.id)
+                        .filterNot { it.name.endsWith(".zip", ignoreCase = true) }
+                        .map { "output/${it.name}" }
+                }
                 val file = sandbox.createZipBundle(comp.id, zName, paths)
                 val art = registerArtifact(comp.id, bot.name, zName, file, "Packaged ZIP (${paths.size} files)")
                 JSONObject().put("ok", true).put("rel_path", art.relPath).put("bytes", art.sizeBytes).toString() to art
@@ -2235,16 +2390,26 @@ class AutonomousEngine(
     }
 
     private fun buildFallbackPdfArtifact(comp: CompanyItem, bot: BotItem, title: String, goal: String, spec: String): ArtifactItem {
+        val hasDistinctResearch = spec.isNotBlank() && spec.trim() != goal.trim()
+        val sections = mutableListOf<Pair<String, String>>()
+        sections.add("Executive Overview" to goal)
+        if (hasDistinctResearch) {
+            sections.add("Research & Deliverable Plan" to spec.removePrefix(goal).trim().ifBlank { spec })
+        }
+        val statusNote = if (hasActiveEngine()) {
+            "This recovery document was assembled inside sandbox '${comp.name}' because the authoring step was interrupted or timed out. Send 'continue' or tap Regenerate to author the full illustrated edition."
+        } else {
+            "This local preview was generated inside sandbox '${comp.name}'. Connect Antigravity CLI or an LLM provider in Settings to unlock full AI book authoring."
+        }
+        sections.add("Production Status" to statusNote)
+
         val file = sandbox.createPdf(
             companyId = comp.id,
             filename = "${slugify(title)}.pdf",
             title = title,
-            subtitle = "${comp.name} · Generated in on-device sandbox by ${bot.name}",
-            sections = listOf(
-                "Mission Brief" to goal,
-                "Scope & Architecture" to spec,
-                "Quality & Publishing Notes" to "This deliverable was generated directly inside your Android sandbox (${comp.id}). Add an LLM API key in Settings to unlock full AI authoring.",
-            ),
+            subtitle = "${comp.name} · ${bot.name}",
+            sections = sections,
+            author = comp.name,
         )
         return registerArtifact(comp.id, bot.name, title, file, "On-device PDF deliverable")
     }

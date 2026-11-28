@@ -7,9 +7,9 @@ on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: 'Release tag (e.g. v0.9.0)'
+        description: 'Release tag (e.g. v0.9.1)'
         required: false
-        default: 'v0.9.0'
+        default: 'v0.9.1'
 
 permissions:
   contents: write
@@ -87,7 +87,7 @@ jobs:
             if [[ "${{ github.ref }}" == refs/tags/* ]]; then
               TAG="${{ github.ref_name }}"
             else
-              TAG="v0.9.0"
+              TAG="v0.9.1"
             fi
           fi
 
@@ -98,7 +98,7 @@ jobs:
           UNIQUE_APK="/tmp/${ASSET_NAME}"
           cp "$APK_PATH" "$UNIQUE_APK"
 
-          NOTES="$(printf '### CEO — 100%% On-Device Autonomous Company OS (%s)\n\n- **Choix interactifs en 1 clic (façon ChatGPT)** : lorsque le CEO propose des options ou directions, des cartes cliquables apparaissent directement sous la réponse et envoient votre choix en un tap\n- **Réponses normales brèves et concises** : le CEO répond désormais de façon directe, courte et structurée pour les échanges courants\n- **Contrôles de messages complets** : **Copier** et **Modifier & renvoyer** sur vos messages utilisateur ; **Copier** et **Régénérer** sur les réponses IA\n- **Antigravity CLI embarqué** (`agy` ARM64 officiel) + **Store de 14 plugins** + **Exécution arrière-plan 24/7** + **Mémoire Notion par entreprise**\n- **Taille APK** : `%s`\n- **SHA-256** : `%s`\n- **Compilé sur** : GitHub Actions (`ubuntu-latest`)\n' "$TAG" "$SIZE" "$SHA256")"
+          NOTES="$(printf '### CEO — 100%% On-Device Autonomous Company OS (%s)\n\n- **Moteur PDF Livre & Workbook Illustré (`PdfBookRenderer`)** : couverture pleine page thématisée avec illustrations vectorielles, Sommaire automatique, bannières de chapitres, mise en forme Markdown complète (gras, sous-titres, cases à cocher imprimables `- [ ]`, citations encadrées, tableaux, lignes d'\''exercice) et schémas/graphiques vectoriels intégrés (`bar_chart`, `roadmap`, `habit_tracker`, `kpi_grid`, `framework`, `checklist_card`)\n- **Fin des PDFs de secours vides** : timeout Producteur porté à 4 min (`240s`), `maxTokens = 8192`, récolte automatique des fichiers générés sur disque, conversion automatique du Markdown en livre illustré, et synthèse IA directe d'\''un vrai livre complet multi-chapitres en cas de délai dépassé\n- **Choix interactifs en 1 clic (façon ChatGPT)** + **Réponses normales concises** + **Copier / Modifier / Régénérer** sur tous les messages\n- **Taille APK** : `%s`\n- **SHA-256** : `%s`\n- **Compilé sur** : GitHub Actions (`ubuntu-latest`)\n' "$TAG" "$SIZE" "$SHA256")"
 
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" "$UNIQUE_APK" --clobber

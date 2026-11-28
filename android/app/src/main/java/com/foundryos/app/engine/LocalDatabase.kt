@@ -9,6 +9,7 @@ import com.foundryos.app.data.ArtifactItem
 import com.foundryos.app.data.BoardMeetingData
 import com.foundryos.app.data.BotItem
 import com.foundryos.app.data.ChatMessageItem
+import com.foundryos.app.data.ChoicePromptData
 import com.foundryos.app.data.CompanyItem
 import com.foundryos.app.data.ConnectorItem
 import org.json.JSONArray
@@ -313,6 +314,7 @@ class LocalDatabase(context: Context) : SQLiteOpenHelper(context, "ceo_ondevice.
     }
 
     fun insertMessage(m: ChatMessageItem, rawPayloadJson: String? = null) {
+        val payloadToStore = rawPayloadJson ?: m.choices?.let { ChoiceExtractor.toPayloadJson(it) }
         val cv = ContentValues().apply {
             put("id", m.id)
             put("company_id", m.companyId)
@@ -321,16 +323,47 @@ class LocalDatabase(context: Context) : SQLiteOpenHelper(context, "ceo_ondevice.
             put("bot_name", m.botName)
             put("content", m.content)
             put("card_type", m.cardType)
-            put("card_payload_json", rawPayloadJson)
+            put("card_payload_json", payloadToStore)
             put("created_at", m.createdAt.ifBlank { nowIso() })
         }
         writableDatabase.insertOrThrow("messages", null, cv)
     }
 
+    fun updateMessageContent(messageId: String, newContent: String) {
+        writableDatabase.execSQL(
+            "UPDATE messages SET content = ? WHERE id = ?",
+            arrayOf(newContent, messageId),
+        )
+    }
+
+    fun updateMessageChoiceSelection(messageId: String, selectedOptionId: String) {
+        readableDatabase.rawQuery(
+            "SELECT card_payload_json FROM messages WHERE id = ?",
+            arrayOf(messageId),
+        ).use { cur ->
+            if (!cur.moveToFirst()) return
+            val raw = cur.getString(0)
+            val obj = runCatching { JSONObject(raw ?: "{}") }.getOrDefault(JSONObject())
+            obj.put("selected_choice_id", selectedOptionId)
+            writableDatabase.execSQL(
+                "UPDATE messages SET card_payload_json = ? WHERE id = ?",
+                arrayOf(obj.toString(), messageId),
+            )
+        }
+    }
+
+    fun deleteMessagesAfter(companyId: String, anchorMessageId: String): Int {
+        return writableDatabase.delete(
+            "messages",
+            "company_id = ? AND rowid > (SELECT rowid FROM messages WHERE id = ?)",
+            arrayOf(companyId, anchorMessageId),
+        )
+    }
+
     fun listMessages(companyId: String): List<ChatMessageItem> {
         val out = mutableListOf<ChatMessageItem>()
         readableDatabase.rawQuery(
-            "SELECT * FROM messages WHERE company_id = ? ORDER BY created_at ASC LIMIT 200",
+            "SELECT * FROM messages WHERE company_id = ? ORDER BY created_at ASC, rowid ASC LIMIT 200",
             arrayOf(companyId),
         ).use { cur ->
             while (cur.moveToNext()) {
@@ -347,6 +380,7 @@ class LocalDatabase(context: Context) : SQLiteOpenHelper(context, "ceo_ondevice.
                 var art: ArtifactItem? = null
                 var apr: ApprovalItem? = null
                 var board: BoardMeetingData? = null
+                var choicesData: ChoicePromptData? = null
 
                 if (payload != null) {
                     when (cardType) {
@@ -406,6 +440,9 @@ class LocalDatabase(context: Context) : SQLiteOpenHelper(context, "ceo_ondevice.
                                 tokenBudget = payload.optInt("token_budget", 250000),
                             )
                         }
+                        "choices" -> {
+                            choicesData = ChoiceExtractor.fromPayloadJson(payload)
+                        }
                     }
                 }
 
@@ -425,6 +462,7 @@ class LocalDatabase(context: Context) : SQLiteOpenHelper(context, "ceo_ondevice.
                         artifact = art,
                         approval = apr,
                         boardMeeting = board,
+                        choices = choicesData,
                         createdAt = cur.getString(cur.getColumnIndexOrThrow("created_at")),
                     )
                 )

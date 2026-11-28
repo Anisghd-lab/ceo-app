@@ -636,4 +636,139 @@ class AutonomousBotsEndToEndTest {
         assertEquals("PATCH", patchWeek2.method)
         assertEquals("/v1/blocks/notion_cmp_page_99/children", patchWeek2.path)
     }
+
+    @Test
+    fun interactiveChoices_parsesStructuredJsonAndMarkdownFallbackSafely() = runTest {
+        val cid = "cmp_choices_test"
+        db.insertCompany(
+            com.foundryos.app.data.CompanyItem(
+                id = cid,
+                name = "ChoiceCo",
+                description = "Interactive CEO choices test",
+                missionStatement = "Test concise replies and interactive choices",
+                status = "ACTIVE",
+                botsCount = 1,
+            )
+        )
+        db.insertBot(
+            com.foundryos.app.data.BotItem(
+                id = "b_ceo_choice",
+                companyId = cid,
+                name = "CEO",
+                role = "CEO",
+                tagline = "Concise interactive CEO",
+                systemPrompt = "Lead ChoiceCo",
+                avatarShape = "circle",
+                avatarColor = "#111111",
+                allowedTools = listOf("sandbox_files"),
+                model = "auto",
+                isCeo = true,
+                isQa = false,
+            )
+        )
+
+        // 1) Structured JSON choices from CEO
+        aiServer.enqueue(
+            openAiWrap(
+                """{"action":"choices","reply":"Par quelle priorité veux-tu commencer ?","choices":[{"label":"Audit SEO","description":"Analyse rapide des 5 concurrents","value":"Lance l'audit SEO"},{"label":"Campagne Instagram","description":"3 reels ciblés","value":"Lance la campagne Instagram"}]}"""
+            )
+        )
+        engine.handleFounderMessage(cid, "Que proposes-tu ?")
+
+        // Verify system prompt instructs brevity & interactive choices
+        val req1 = aiServer.takeRequest()
+        val body1 = req1.body.readUtf8()
+        assertTrue("CEO system prompt must include brevity directive", body1.contains("BREVITY & CONCISENESS"))
+        assertTrue("CEO system prompt must include interactive choices directive", body1.contains("INTERACTIVE CHOICES"))
+
+        val msgs1 = db.listMessages(cid)
+        val choiceMsg = msgs1.last()
+        assertEquals("choices", choiceMsg.cardType)
+        assertEquals("Par quelle priorité veux-tu commencer ?", choiceMsg.content)
+        assertNotNull(choiceMsg.choices)
+        assertEquals(2, choiceMsg.choices!!.options.size)
+        assertEquals("Audit SEO", choiceMsg.choices!!.options[0].label)
+        assertEquals("Lance l'audit SEO", choiceMsg.choices!!.options[0].value)
+
+        // Persist user's single-tap choice selection
+        db.updateMessageChoiceSelection(choiceMsg.id, choiceMsg.choices!!.options[0].id)
+        val reloaded = db.listMessages(cid).first { it.id == choiceMsg.id }
+        assertEquals(choiceMsg.choices!!.options[0].id, reloaded.choices?.selectedOptionId)
+
+        // 2) Markdown fallback detection for genuine choice question
+        val mdChoices = com.foundryos.app.engine.ChoiceExtractor.detectChoicesFromMarkdown(
+            "Quelle direction préfères-tu ?\n1. **Landing page** — maquette HTML\n2. **Étude marché** — top 5 concurrents"
+        )
+        assertNotNull("Markdown question with numbered options must become interactive choices", mdChoices)
+        assertEquals(2, mdChoices!!.second.size)
+        assertEquals("Landing page", mdChoices.second[0].label)
+
+        // 3) Factual numbered list WITHOUT choice cue must stay plain text (no false positives)
+        val factual = com.foundryos.app.engine.ChoiceExtractor.detectChoicesFromMarkdown(
+            "Voici les 2 résultats du jour :\n1. Trafic : +18%\n2. QA : 96/100"
+        )
+        assertEquals(null, factual)
+    }
+
+    @Test
+    fun editUserMessageAndRegenerateBotReply_updatesHistoryAndRecomputesResponse() = runTest {
+        val cid = "cmp_edit_regen"
+        db.insertCompany(
+            com.foundryos.app.data.CompanyItem(
+                id = cid,
+                name = "ChatOpsCo",
+                description = "Verify edit & regenerate chat actions",
+                missionStatement = "Smooth ChatGPT-style conversation controls",
+                status = "ACTIVE",
+                botsCount = 1,
+            )
+        )
+        db.insertBot(
+            com.foundryos.app.data.BotItem(
+                id = "b_ceo_er",
+                companyId = cid,
+                name = "CEO",
+                role = "CEO",
+                tagline = "CEO",
+                systemPrompt = "Lead ChatOpsCo",
+                avatarShape = "circle",
+                avatarColor = "#111111",
+                allowedTools = emptyList(),
+                model = "auto",
+                isCeo = true,
+                isQa = false,
+            )
+        )
+
+        // Initial turn
+        aiServer.enqueue(openAiWrap("Première réponse concise du CEO."))
+        engine.handleFounderMessage(cid, "Donne un résumé rapide.")
+
+        val initialMsgs = db.listMessages(cid)
+        assertEquals(2, initialMsgs.size)
+        val humanMsg = initialMsgs[0]
+        val botMsg1 = initialMsgs[1]
+        assertEquals("human", humanMsg.senderType)
+        assertEquals("Première réponse concise du CEO.", botMsg1.content)
+
+        // Regenerate AI response
+        aiServer.enqueue(openAiWrap("Réponse régénérée plus nette."))
+        val regenOk = engine.regenerateResponse(cid, botMsg1.id)
+        assertTrue("Regenerate should succeed", regenOk)
+
+        val afterRegen = db.listMessages(cid)
+        assertEquals("Regenerate must replace previous AI message without duplicating human message", 2, afterRegen.size)
+        assertEquals(humanMsg.id, afterRegen[0].id)
+        assertEquals("Réponse régénérée plus nette.", afterRegen[1].content)
+
+        // Edit human message and re-send
+        aiServer.enqueue(openAiWrap("Réponse adaptée au message modifié."))
+        engine.editAndResendMessage(cid, humanMsg.id, "Donne plutôt 2 actions prioritaires.")
+
+        val afterEdit = db.listMessages(cid)
+        assertEquals("Edit must update human message and replace following AI message", 2, afterEdit.size)
+        assertEquals(humanMsg.id, afterEdit[0].id)
+        assertEquals("Donne plutôt 2 actions prioritaires.", afterEdit[0].content)
+        assertEquals("Réponse adaptée au message modifié.", afterEdit[1].content)
+    }
 }

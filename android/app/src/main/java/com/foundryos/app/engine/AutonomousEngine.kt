@@ -10,6 +10,8 @@ import com.foundryos.app.data.BotActionTrace
 import com.foundryos.app.data.BotItem
 import com.foundryos.app.data.BotLiveActivity
 import com.foundryos.app.data.ChatMessageItem
+import com.foundryos.app.data.ChoiceOption
+import com.foundryos.app.data.ChoicePromptData
 import com.foundryos.app.data.CompanyItem
 import com.foundryos.app.data.CompanyProposalData
 import com.foundryos.app.data.LiveReasoningState
@@ -838,11 +840,14 @@ class AutonomousEngine(
         attachmentsSummary: String = "",
         displayMessage: String = text,
         targetBotId: String? = null,
+        insertHumanMessage: Boolean = true,
         onStatusUpdate: suspend (String) -> Unit = {},
     ) {
         resetCancellation()
         val comp = db.getCompany(companyId) ?: return
-        db.insertMessage(ChatMessageItem("msg_${UUID.randomUUID().toString().take(10)}", companyId, "human", content = displayMessage))
+        if (insertHumanMessage) {
+            db.insertMessage(ChatMessageItem("msg_${UUID.randomUUID().toString().take(10)}", companyId, "human", content = displayMessage))
+        }
 
         if (killSwitch) {
             db.insertMessage(
@@ -876,19 +881,23 @@ class AutonomousEngine(
                 task = if (stopped) "Stopped by Founder" else reply.take(80),
                 reasoning = _liveReasoning.value.thinkingText,
             )
-            db.updateBotStatus(targetBot.id, if (stopped) "idle" else "idle", if (stopped) "Stopped" else reply.take(50))
+            db.updateBotStatus(targetBot.id, "idle", if (stopped) "Stopped" else reply.take(50))
             finishReasoning(if (stopped) "Stopped" else "${targetBot.name} finished")
             if (!stopped || reply.isNotBlank()) {
-                db.insertMessage(
-                    ChatMessageItem(
-                        "msg_${UUID.randomUUID().toString().take(10)}",
-                        companyId,
-                        "bot",
-                        botId = targetBot.id,
-                        botName = targetBot.name,
-                        content = if (stopped) "⏹️ Stopped (${targetBot.name})." else reply,
+                if (stopped) {
+                    db.insertMessage(
+                        ChatMessageItem(
+                            "msg_${UUID.randomUUID().toString().take(10)}",
+                            companyId,
+                            "bot",
+                            botId = targetBot.id,
+                            botName = targetBot.name,
+                            content = "⏹️ Stopped (${targetBot.name}).",
+                        )
                     )
-                )
+                } else {
+                    insertBotReplyWithChoices(companyId, targetBot.id, targetBot.name, reply, explicitChoices = null)
+                }
             }
             return
         }
@@ -926,6 +935,106 @@ class AutonomousEngine(
 
         // User is addressing CEO directly -> always reason via Antigravity CLI / active AI engine
         runCeoReasoningTurn(comp, ceoBot, bots, enrichedPrompt, onStatusUpdate)
+    }
+
+    suspend fun editAndResendMessage(
+        companyId: String,
+        messageId: String,
+        newText: String,
+        targetBotId: String? = null,
+        onStatusUpdate: suspend (String) -> Unit = {},
+    ) {
+        val cleaned = newText.trim()
+        if (cleaned.isBlank()) return
+        db.updateMessageContent(messageId, cleaned)
+        db.deleteMessagesAfter(companyId, messageId)
+        handleFounderMessage(
+            companyId = companyId,
+            text = cleaned,
+            displayMessage = cleaned,
+            targetBotId = targetBotId,
+            insertHumanMessage = false,
+            onStatusUpdate = onStatusUpdate,
+        )
+    }
+
+    suspend fun regenerateResponse(
+        companyId: String,
+        botMessageId: String,
+        onStatusUpdate: suspend (String) -> Unit = {},
+    ): Boolean {
+        val msgs = db.listMessages(companyId)
+        val idx = msgs.indexOfFirst { it.id == botMessageId }
+        if (idx < 0) return false
+        val targetMsg = msgs[idx]
+        val prevHuman = msgs.subList(0, idx).lastOrNull { it.senderType == "human" } ?: return false
+        val targetBotId = targetMsg.botId?.let { id ->
+            db.listBots(companyId).firstOrNull { it.id == id && !it.isCeo }?.id
+        }
+        db.deleteMessagesAfter(companyId, prevHuman.id)
+        handleFounderMessage(
+            companyId = companyId,
+            text = prevHuman.content,
+            displayMessage = prevHuman.content,
+            targetBotId = targetBotId,
+            insertHumanMessage = false,
+            onStatusUpdate = onStatusUpdate,
+        )
+        return true
+    }
+
+    private fun insertBotReplyWithChoices(
+        companyId: String,
+        botId: String?,
+        botName: String,
+        rawReply: String,
+        explicitChoices: List<ChoiceOption>? = null,
+    ) {
+        var finalText = rawReply.trim()
+        var options = explicitChoices
+
+        if (options.isNullOrEmpty()) {
+            val maybeJson = llm.extractJsonObject(finalText)
+            val fromJson = maybeJson?.let { ChoiceExtractor.parseStructuredChoices(it) }
+            if (fromJson != null) {
+                finalText = fromJson.first
+                options = fromJson.second
+            } else {
+                val fromMd = ChoiceExtractor.detectChoicesFromMarkdown(finalText)
+                if (fromMd != null) {
+                    finalText = fromMd.first
+                    options = fromMd.second
+                }
+            }
+        }
+
+        if (!options.isNullOrEmpty()) {
+            val choiceData = ChoicePromptData(options = options)
+            db.insertMessage(
+                ChatMessageItem(
+                    id = "msg_${UUID.randomUUID().toString().take(10)}",
+                    companyId = companyId,
+                    senderType = "bot",
+                    botId = botId,
+                    botName = botName,
+                    content = finalText,
+                    cardType = "choices",
+                    choices = choiceData,
+                ),
+                rawPayloadJson = ChoiceExtractor.toPayloadJson(choiceData),
+            )
+        } else {
+            db.insertMessage(
+                ChatMessageItem(
+                    id = "msg_${UUID.randomUUID().toString().take(10)}",
+                    companyId = companyId,
+                    senderType = "bot",
+                    botId = botId,
+                    botName = botName,
+                    content = finalText,
+                )
+            )
+        }
     }
 
     private suspend fun runCeoReasoningTurn(
@@ -989,6 +1098,9 @@ class AutonomousEngine(
 
             Instructions:
             - Respond in the exact same language as the Founder (e.g. French if the founder writes in French).
+            - BREVITY & CONCISENESS (CRITICAL): For normal conversational messages, status checks, confirmations, or advice, keep your reply BRIEF, DIRECT, and CONCISE (2 to 4 short sentences, or at most 4 tight bullets). Avoid fluff, long preambles, or repeating what the Founder already knows. Only write long detailed prose if explicitly requested or inside generated files/deliverables.
+            - INTERACTIVE CHOICES (CRITICAL): Whenever you present options, strategic choices, or ask the Founder to choose between 2 to 5 directions/actions, keep your prompt to 1-2 short sentences and ALWAYS output ONE JSON object so the app renders one-tap clickable ChatGPT-style cards:
+              {"action":"choices","reply":"Short crisp question (1-2 sentences)","choices":[{"label":"Short option title","description":"Brief 1-line detail (optional)","value":"Exact concise choice sent when tapped"}]}
             - Think step-by-step and give a genuinely reasoned, concrete, helpful CEO answer aligned with the company objective. Never output canned filler.
             - As CEO, you can assign or update any specialist bot's individual role and tailored system prompt aligned with the company objective by calling:
               {"action":"tool","tool":"assign_bot_prompt","args":{"bot_name":"Builder","role":"...","system_prompt":"..."}}
@@ -997,8 +1109,8 @@ class AutonomousEngine(
               Supported sandbox tools: list_files, read_file, write_file, create_pdf, create_zip, product_design_prototype, assign_bot_prompt.
               Or ANY connected plugin tool above (browser_search, browser_read_url, notion_search, github_list_repos, slack_list_channels, gmail_search, gdrive_search, figma_get_file, canva_list_designs, scite_search, tinyfish_extract, etc.).
             - ONLY if the Founder wants a full multi-bot pipeline producing deliverables with QA + Approval, output:
-              {"action":"run_mission","title":"Short mission title","goal":"Detailed mission goal","ceo_reply":"Your reasoned CEO plan explaining how your specialists will use plugins & LLMs","bot_mandates":{"Strategist":"Tailored mission directive aligned with role & objective","Builder":"Tailored mission directive"}}
-            - When ready to reply directly (or after tool observations), respond with clean prose/markdown (or {"action":"final","reply":"..."}).
+              {"action":"run_mission","title":"Short mission title","goal":"Detailed mission goal","ceo_reply":"Brief 1-2 sentence CEO plan","bot_mandates":{"Strategist":"Tailored mission directive aligned with role & objective","Builder":"Tailored mission directive"}}
+            - When ready to reply directly (without choices), respond with brief, concise prose/markdown (or {"action":"final","reply":"..."}).
         """.trimIndent()
 
         val history = mutableListOf<String>()
@@ -1006,6 +1118,7 @@ class AutonomousEngine(
         history.add("Latest message to CEO:\n$userPrompt")
 
         var finalReply = ""
+        var finalChoices: List<ChoiceOption>? = null
         for (step in 1..6) {
             if (runCancelled || killSwitch) break
             updateReasoningStatus(if (step == 1) "CEO reasoning via $activeModelLabel..." else "CEO step $step/6...")
@@ -1081,8 +1194,24 @@ class AutonomousEngine(
                     history.add("Step $step CEO tool batch executed")
                     history.add("Observation:\n$obs")
                 }
+                act == "choices" && obj != null -> {
+                    val parsedChoices = ChoiceExtractor.parseStructuredChoices(obj)
+                    if (parsedChoices != null) {
+                        finalReply = parsedChoices.first
+                        finalChoices = parsedChoices.second
+                    } else {
+                        finalReply = obj.optString("reply").ifBlank { res.content }
+                    }
+                    break
+                }
                 act == "final" && obj != null -> {
-                    finalReply = obj.optString("reply").ifBlank { obj.optString("summary") }.ifBlank { res.content }
+                    val parsedChoices = ChoiceExtractor.parseStructuredChoices(obj)
+                    if (parsedChoices != null) {
+                        finalReply = parsedChoices.first
+                        finalChoices = parsedChoices.second
+                    } else {
+                        finalReply = obj.optString("reply").ifBlank { obj.optString("summary") }.ifBlank { res.content }
+                    }
                     break
                 }
                 else -> {
@@ -1119,15 +1248,12 @@ class AutonomousEngine(
             db.updateBotStatus(it.id, "idle", finalReply.take(48))
         }
         finishReasoning("CEO reasoned (${finalReply.length} chars)")
-        db.insertMessage(
-            ChatMessageItem(
-                "msg_${UUID.randomUUID().toString().take(10)}",
-                comp.id,
-                "bot",
-                botId = ceoBot?.id,
-                botName = "CEO",
-                content = finalReply,
-            )
+        insertBotReplyWithChoices(
+            companyId = comp.id,
+            botId = ceoBot?.id,
+            botName = "CEO",
+            rawReply = finalReply,
+            explicitChoices = finalChoices,
         )
     }
 
@@ -1163,7 +1289,8 @@ class AutonomousEngine(
             You are an autonomous agentic specialist. Always use connected plugins & Antigravity CLI/sandbox directly and record artifacts in `output/` so every bot stays aware of all progress:
             - Execute 1 tool: {"action":"tool","tool":"<tool_name>","args":{...}}
             - Execute multiple tools together: {"action":"tools","calls":[{"tool":"...","args":{...}},{"tool":"...","args":{...}}]}
-            - Otherwise reply directly with your reasoned specialist answer (or {"action":"final","reply":"..."}). Match the Founder's language.
+            - If asking the Founder to choose between 2-5 options: {"action":"choices","reply":"Short question","choices":[{"label":"...","description":"...","value":"..."}]}
+            - Otherwise reply directly with a brief, concise specialist answer (2-4 short sentences for normal replies; or {"action":"final","reply":"..."}). Match the Founder's language.
         """.trimIndent()
 
         val history = mutableListOf<String>()

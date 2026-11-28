@@ -10,12 +10,14 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.ArrowForward
 import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.Description
 import androidx.compose.material.icons.rounded.Download
@@ -30,6 +32,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
@@ -40,6 +43,8 @@ import com.foundryos.app.data.ApprovalItem
 import com.foundryos.app.data.ArtifactItem
 import com.foundryos.app.data.BoardMeetingData
 import com.foundryos.app.data.BotItem
+import com.foundryos.app.data.ChoiceOption
+import com.foundryos.app.data.ChoicePromptData
 import com.foundryos.app.ui.theme.FoundryColors
 
 /**
@@ -534,4 +539,130 @@ private fun formatBytes(bytes: Long): String {
     val kb = bytes / 1024.0
     if (kb < 1024) return String.format("%.1f KB", kb)
     return String.format("%.2f MB", kb / 1024.0)
+}
+
+/**
+ * 5. ChatGPT-style one-tap interactive choice cards rendered beneath CEO/bot questions.
+ */
+@Composable
+fun InteractiveChoicesCard(
+    choices: ChoicePromptData,
+    isBusy: Boolean,
+    onSelect: (ChoiceOption) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val selectedId = choices.selectedOptionId
+    val hasSelection = !selectedId.isNullOrBlank()
+
+    Column(
+        modifier = modifier.fillMaxWidth(0.92f),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        choices.options.forEachIndexed { idx, opt ->
+            val isSelected = selectedId == opt.id
+            val clickable = !hasSelection && !isBusy
+            val cardBg = when {
+                isSelected -> FoundryColors.GreenBg
+                else -> FoundryColors.CardBg
+            }
+            val borderColor = when {
+                isSelected -> FoundryColors.GreenSolid
+                else -> FoundryColors.Border
+            }
+            val cardAlpha = when {
+                isSelected -> 1f
+                hasSelection -> 0.54f
+                isBusy -> 0.65f
+                else -> 1f
+            }
+
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = 48.dp)
+                    .alpha(cardAlpha)
+                    .clip(RoundedCornerShape(14.dp))
+                    .background(cardBg)
+                    .border(
+                        width = if (isSelected) 1.5.dp else 1.dp,
+                        color = borderColor,
+                        shape = RoundedCornerShape(14.dp),
+                    )
+                    .clickable(enabled = clickable) { onSelect(opt) }
+                    .padding(horizontal = 12.dp, vertical = 10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                if (isSelected) {
+                    Icon(
+                        imageVector = Icons.Rounded.CheckCircle,
+                        contentDescription = "Choisi",
+                        tint = FoundryColors.GreenSolid,
+                        modifier = Modifier.size(22.dp),
+                    )
+                } else {
+                    Box(
+                        modifier = Modifier
+                            .size(24.dp)
+                            .clip(CircleShape)
+                            .background(FoundryColors.SoftSurface),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Text(
+                            text = "${idx + 1}",
+                            fontSize = 11.5.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = FoundryColors.InkPrimary,
+                        )
+                    }
+                }
+
+                Spacer(Modifier.width(10.dp))
+
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = opt.label,
+                        style = MaterialTheme.typography.titleMedium.copy(
+                            fontSize = 13.5.sp,
+                            fontWeight = FontWeight.SemiBold,
+                        ),
+                        color = if (isSelected) FoundryColors.GreenInk else FoundryColors.InkPrimary,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    if (opt.description.isNotBlank()) {
+                        Spacer(Modifier.height(2.dp))
+                        Text(
+                            text = opt.description,
+                            style = MaterialTheme.typography.labelMedium.copy(fontSize = 12.sp),
+                            color = FoundryColors.InkSecondary,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                }
+
+                Spacer(Modifier.width(8.dp))
+
+                if (isSelected) {
+                    Text(
+                        text = "Choisi",
+                        fontSize = 10.5.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = FoundryColors.GreenInk,
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(999.dp))
+                            .background(Color.White)
+                            .padding(horizontal = 8.dp, vertical = 3.dp),
+                    )
+                } else {
+                    Icon(
+                        imageVector = Icons.AutoMirrored.Rounded.ArrowForward,
+                        contentDescription = "Choisir ${opt.label}",
+                        tint = FoundryColors.InkSecondary,
+                        modifier = Modifier.size(16.dp),
+                    )
+                }
+            }
+        }
+    }
 }

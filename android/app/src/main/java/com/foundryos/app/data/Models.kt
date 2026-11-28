@@ -85,6 +85,18 @@ data class CompanyProposalData(
     val errorNote: String = "",
 )
 
+data class ChoiceOption(
+    val id: String,
+    val label: String,
+    val description: String = "",
+    val value: String = label,
+)
+
+data class ChoicePromptData(
+    val options: List<ChoiceOption>,
+    val selectedOptionId: String? = null,
+)
+
 data class ChatMessageItem(
     val id: String,
     val companyId: String,
@@ -92,7 +104,7 @@ data class ChatMessageItem(
     val botId: String? = null,
     val botName: String = "",
     val content: String = "",
-    val cardType: String? = null, // company_org | artifact | approval | approval_confirmed | board_meeting
+    val cardType: String? = null, // company_org | artifact | approval | approval_confirmed | board_meeting | choices
     val orgBots: List<BotItem> = emptyList(),
     val orgSubtitle: String = "",
     val orgCompanyName: String = "",
@@ -100,6 +112,7 @@ data class ChatMessageItem(
     val artifact: ArtifactItem? = null,
     val approval: ApprovalItem? = null,
     val boardMeeting: BoardMeetingData? = null,
+    val choices: ChoicePromptData? = null,
     val createdAt: String = "",
 )
 

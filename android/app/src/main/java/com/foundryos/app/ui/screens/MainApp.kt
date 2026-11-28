@@ -37,6 +37,7 @@ import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
@@ -48,11 +49,14 @@ import androidx.compose.material.icons.rounded.Archive
 import androidx.compose.material.icons.rounded.ArrowUpward
 import androidx.compose.material.icons.rounded.Assessment
 import androidx.compose.material.icons.rounded.AttachFile
+import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.ChevronLeft
 import androidx.compose.material.icons.rounded.ChevronRight
 import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material.icons.rounded.Delete
+import androidx.compose.material.icons.rounded.Edit
 import androidx.compose.material.icons.rounded.FolderOpen
 import androidx.compose.material.icons.rounded.KeyboardArrowDown
 import androidx.compose.material.icons.rounded.KeyboardArrowUp
@@ -60,6 +64,7 @@ import androidx.compose.material.icons.rounded.Language
 import androidx.compose.material.icons.rounded.PlaylistAdd
 import androidx.compose.material.icons.rounded.Psychology
 import androidx.compose.material.icons.rounded.Public
+import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material.icons.rounded.Stop
 import androidx.compose.material.icons.rounded.Unarchive
@@ -86,10 +91,16 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -104,6 +115,7 @@ import com.foundryos.app.data.ArtifactItem
 import com.foundryos.app.data.AttachedLocalFile
 import com.foundryos.app.data.BotItem
 import com.foundryos.app.data.ChatMessageItem
+import com.foundryos.app.data.ChoiceOption
 import com.foundryos.app.data.CompanyItem
 import com.foundryos.app.data.CompanyProposalData
 import com.foundryos.app.data.ConnectorItem
@@ -117,6 +129,7 @@ import com.foundryos.app.ui.components.ArtifactDeliverableCard
 import com.foundryos.app.ui.components.BoardMeetingCard
 import com.foundryos.app.ui.components.BotMascot
 import com.foundryos.app.ui.components.CompanyOrgCard
+import com.foundryos.app.ui.components.InteractiveChoicesCard
 import com.foundryos.app.ui.components.ReleaseApprovalCard
 import com.foundryos.app.ui.theme.FoundryColors
 import kotlinx.coroutines.Job
@@ -135,6 +148,8 @@ import java.util.UUID
 fun FoundryMainScreen(repo: FoundryRepository) {
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
+    val clipboardManager = LocalClipboardManager.current
+    val haptics = LocalHapticFeedback.current
 
     var companies by remember { mutableStateOf<List<CompanyItem>>(emptyList()) }
     var activeCompanyId by remember { mutableStateOf<String?>(null) }
@@ -154,6 +169,21 @@ fun FoundryMainScreen(repo: FoundryRepository) {
     var inspectBot by remember { mutableStateOf<BotItem?>(null) }
     var showReasoningExpanded by remember { mutableStateOf(false) }
     var nowMs by remember { mutableLongStateOf(System.currentTimeMillis()) }
+    var editingMessageId by remember { mutableStateOf<String?>(null) }
+    var editingDraft by remember { mutableStateOf("") }
+    var copiedMessageId by remember { mutableStateOf<String?>(null) }
+
+    LaunchedEffect(copiedMessageId) {
+        if (copiedMessageId != null) {
+            delay(1800)
+            copiedMessageId = null
+        }
+    }
+
+    LaunchedEffect(activeCompanyId) {
+        editingMessageId = null
+        editingDraft = ""
+    }
 
     val botTelemetry by repo.botTelemetry().collectAsState()
     val liveReasoning by repo.liveReasoning().collectAsState()
@@ -359,6 +389,116 @@ fun FoundryMainScreen(repo: FoundryRepository) {
                 }
             }
         }
+    }
+
+    fun launchEditAndResend(
+        companyId: String,
+        messageId: String,
+        newText: String,
+        targetBotId: String?,
+    ) {
+        val cleaned = newText.trim()
+        if (cleaned.isBlank() || isBusy) return
+        editingMessageId = null
+        editingDraft = ""
+        val bName = bots.firstOrNull { it.id == targetBotId }?.name ?: "CEO"
+        val startLabel = "$bName recalculating response..."
+        isBusy = true
+        busyLabel = startLabel
+        AgentExecutionService.onStopRequested = {
+            repo.stopAllExecution()
+            scope.launch {
+                isBusy = false
+                busyLabel = ""
+            }
+        }
+        AgentExecutionService.enqueueTask(context, startLabel) {
+            try {
+                repo.editAndResendFounderMessage(
+                    companyId = companyId,
+                    messageId = messageId,
+                    newText = cleaned,
+                    targetBotId = targetBotId,
+                    onStatusUpdate = { status ->
+                        busyLabel = status
+                        AgentExecutionService.updateStatus(context, status)
+                        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                            refreshAll(companyId)
+                        }
+                    },
+                )
+                kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                    refreshAll(companyId)
+                }
+            } finally {
+                kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                    isBusy = false
+                    activeRunJob = null
+                }
+            }
+        }
+    }
+
+    fun launchRegenerate(
+        companyId: String,
+        botMessageId: String,
+    ) {
+        if (isBusy) return
+        editingMessageId = null
+        val startLabel = "Regenerating AI response..."
+        isBusy = true
+        busyLabel = startLabel
+        AgentExecutionService.onStopRequested = {
+            repo.stopAllExecution()
+            scope.launch {
+                isBusy = false
+                busyLabel = ""
+            }
+        }
+        AgentExecutionService.enqueueTask(context, startLabel) {
+            try {
+                repo.regenerateBotMessage(
+                    companyId = companyId,
+                    botMessageId = botMessageId,
+                    onStatusUpdate = { status ->
+                        busyLabel = status
+                        AgentExecutionService.updateStatus(context, status)
+                        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                            refreshAll(companyId)
+                        }
+                    },
+                )
+                kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                    refreshAll(companyId)
+                }
+            } finally {
+                kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                    isBusy = false
+                    activeRunJob = null
+                }
+            }
+        }
+    }
+
+    fun copyMessageToClipboard(msg: ChatMessageItem) {
+        val textToCopy = buildString {
+            append(msg.content.trim())
+            val opts = msg.choices?.options
+            if (!opts.isNullOrEmpty()) {
+                if (isNotEmpty()) append("\n\n")
+                opts.forEachIndexed { i, opt ->
+                    append("${i + 1}. ${opt.label}")
+                    if (opt.description.isNotBlank()) append(" — ${opt.description}")
+                    if (i < opts.lastIndex) append("\n")
+                }
+            }
+        }
+        if (textToCopy.isBlank()) return
+        clipboardManager.setText(AnnotatedString(textToCopy))
+        haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+        copiedMessageId = msg.id
+        val toastText = if (msg.senderType == "human") "Message copié" else "Réponse copiée"
+        Toast.makeText(context, toastText, Toast.LENGTH_SHORT).show()
     }
 
     // Auto-drain FIFO message queue cleanly once the active execution completes
@@ -716,12 +856,24 @@ fun FoundryMainScreen(repo: FoundryRepository) {
                         }
                     }
 
-                    items(messages, key = { it.id }) { msg ->
+                    itemsIndexed(messages, key = { _, m -> m.id }) { idx, msg ->
                         val workingIds = botTelemetry.filterValues { it.status.equals("working", true) }.keys +
                             bots.filter { it.isCeo && (isBusy || liveReasoning.active) }.map { it.id }
+                        val hasPrecedingHuman = messages.subList(0, idx).any { it.senderType == "human" }
+                        val isFollowedByCompanyOrg = messages.getOrNull(idx + 1)?.cardType == "company_org"
+                        val canRegenerate = msg.senderType == "bot" &&
+                            (msg.cardType == null || msg.cardType == "choices") &&
+                            hasPrecedingHuman &&
+                            !isFollowedByCompanyOrg
+                        val isEditingThis = editingMessageId == msg.id
                         ChatMessageRow(
                             msg = msg,
                             workingBotIds = workingIds,
+                            isBusy = isBusy,
+                            isCopied = copiedMessageId == msg.id,
+                            isEditing = isEditingThis,
+                            editDraft = if (isEditingThis) editingDraft else "",
+                            canRegenerate = canRegenerate,
                             onBotClick = { bot ->
                                 val chosen = bots.firstOrNull { it.id == bot.id } ?: bot
                                 selectedBot = chosen
@@ -744,6 +896,34 @@ fun FoundryMainScreen(repo: FoundryRepository) {
                                 if (!opened) {
                                     Toast.makeText(context, "File not found in sandbox", Toast.LENGTH_SHORT).show()
                                 }
+                            },
+                            onChoiceSelect = { option ->
+                                if (!isBusy) {
+                                    haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                                    repo.markMessageChoiceSelected(msg.id, option.id)
+                                    refreshAll(activeCompany.id)
+                                    val targetId = if (headerBot?.isCeo == true) null else headerBot?.id
+                                    launchExecution(activeCompany.id, option.value, emptyList(), targetId)
+                                }
+                            },
+                            onCopy = { copyMessageToClipboard(msg) },
+                            onStartEdit = {
+                                if (!isBusy) {
+                                    editingMessageId = msg.id
+                                    editingDraft = msg.content
+                                }
+                            },
+                            onEditDraftChange = { editingDraft = it },
+                            onCancelEdit = {
+                                editingMessageId = null
+                                editingDraft = ""
+                            },
+                            onSaveEdit = {
+                                val targetId = if (headerBot?.isCeo == true) null else headerBot?.id
+                                launchEditAndResend(activeCompany.id, msg.id, editingDraft, targetId)
+                            },
+                            onRegenerate = {
+                                launchRegenerate(activeCompany.id, msg.id)
                             },
                         )
                     }
@@ -1654,26 +1834,72 @@ fun FoundryMainScreen(repo: FoundryRepository) {
 private fun ChatMessageRow(
     msg: ChatMessageItem,
     workingBotIds: Set<String> = emptySet(),
+    isBusy: Boolean = false,
+    isCopied: Boolean = false,
+    isEditing: Boolean = false,
+    editDraft: String = "",
+    canRegenerate: Boolean = false,
     onBotClick: (BotItem) -> Unit,
     onApprove: (String) -> Unit,
     onReject: (String) -> Unit,
     onDownloadArtifact: (ArtifactItem) -> Unit,
+    onChoiceSelect: (ChoiceOption) -> Unit = {},
+    onCopy: () -> Unit = {},
+    onStartEdit: () -> Unit = {},
+    onEditDraftChange: (String) -> Unit = {},
+    onCancelEdit: () -> Unit = {},
+    onSaveEdit: () -> Unit = {},
+    onRegenerate: () -> Unit = {},
 ) {
     when {
         msg.senderType == "human" -> {
-            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth(0.82f)
-                        .clip(RoundedCornerShape(20.dp))
-                        .background(FoundryColors.InkPrimary)
-                        .padding(horizontal = 15.dp, vertical = 12.dp),
-                ) {
-                    Text(
-                        text = msg.content,
-                        style = MaterialTheme.typography.bodyLarge,
-                        color = Color.White,
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .animateContentSize(),
+                horizontalAlignment = Alignment.End,
+            ) {
+                if (isEditing) {
+                    HumanMessageEditCard(
+                        draft = editDraft,
+                        onDraftChange = onEditDraftChange,
+                        onCancel = onCancelEdit,
+                        onSave = onSaveEdit,
                     )
+                } else {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth(0.82f)
+                            .clip(RoundedCornerShape(20.dp))
+                            .background(FoundryColors.InkPrimary)
+                            .padding(horizontal = 15.dp, vertical = 12.dp),
+                    ) {
+                        Text(
+                            text = msg.content,
+                            style = MaterialTheme.typography.bodyLarge,
+                            color = Color.White,
+                        )
+                    }
+                    Spacer(Modifier.height(4.dp))
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        MessageActionPill(
+                            icon = if (isCopied) Icons.Rounded.Check else Icons.Rounded.ContentCopy,
+                            label = if (isCopied) "Copié" else "Copier",
+                            tint = if (isCopied) FoundryColors.GreenInk else FoundryColors.InkSecondary,
+                            enabled = true,
+                            onClick = onCopy,
+                        )
+                        MessageActionPill(
+                            icon = Icons.Rounded.Edit,
+                            label = "Modifier",
+                            tint = FoundryColors.InkSecondary,
+                            enabled = !isBusy,
+                            onClick = onStartEdit,
+                        )
+                    }
                 }
             }
         }
@@ -1732,8 +1958,195 @@ private fun ChatMessageRow(
                 BoardMeetingCard(data = msg.boardMeeting)
             }
         }
+        msg.cardType == "choices" && msg.choices != null -> {
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalAlignment = Alignment.Start,
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                if (msg.content.isNotBlank()) {
+                    BotBubble(text = msg.content)
+                }
+                InteractiveChoicesCard(
+                    choices = msg.choices,
+                    isBusy = isBusy,
+                    onSelect = onChoiceSelect,
+                )
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.padding(start = 2.dp),
+                ) {
+                    MessageActionPill(
+                        icon = if (isCopied) Icons.Rounded.Check else Icons.Rounded.ContentCopy,
+                        label = if (isCopied) "Copié" else "Copier",
+                        tint = if (isCopied) FoundryColors.GreenInk else FoundryColors.InkSecondary,
+                        enabled = true,
+                        onClick = onCopy,
+                    )
+                    if (canRegenerate) {
+                        MessageActionPill(
+                            icon = Icons.Rounded.Refresh,
+                            label = "Régénérer",
+                            tint = FoundryColors.InkSecondary,
+                            enabled = !isBusy,
+                            onClick = onRegenerate,
+                        )
+                    }
+                }
+            }
+        }
         else -> {
-            BotBubble(text = msg.content)
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalAlignment = Alignment.Start,
+            ) {
+                BotBubble(text = msg.content)
+                if (msg.content.isNotBlank()) {
+                    Spacer(Modifier.height(4.dp))
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.padding(start = 2.dp),
+                    ) {
+                        MessageActionPill(
+                            icon = if (isCopied) Icons.Rounded.Check else Icons.Rounded.ContentCopy,
+                            label = if (isCopied) "Copié" else "Copier",
+                            tint = if (isCopied) FoundryColors.GreenInk else FoundryColors.InkSecondary,
+                            enabled = true,
+                            onClick = onCopy,
+                        )
+                        if (canRegenerate) {
+                            MessageActionPill(
+                                icon = Icons.Rounded.Refresh,
+                                label = "Régénérer",
+                                tint = FoundryColors.InkSecondary,
+                                enabled = !isBusy,
+                                onClick = onRegenerate,
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun MessageActionPill(
+    icon: ImageVector,
+    label: String,
+    tint: Color,
+    enabled: Boolean,
+    onClick: () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .heightIn(min = 34.dp)
+            .alpha(if (enabled) 1f else 0.45f)
+            .clip(RoundedCornerShape(999.dp))
+            .background(FoundryColors.SidebarBg)
+            .border(1.dp, FoundryColors.Border, RoundedCornerShape(999.dp))
+            .clickable(enabled = enabled) { onClick() }
+            .padding(horizontal = 10.dp, vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        Icon(
+            imageVector = icon,
+            contentDescription = label,
+            tint = tint,
+            modifier = Modifier.size(14.dp),
+        )
+        Text(
+            text = label,
+            fontSize = 11.5.sp,
+            fontWeight = FontWeight.Medium,
+            color = tint,
+            maxLines = 1,
+            softWrap = false,
+        )
+    }
+}
+
+@Composable
+private fun HumanMessageEditCard(
+    draft: String,
+    onDraftChange: (String) -> Unit,
+    onCancel: () -> Unit,
+    onSave: () -> Unit,
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth(0.92f)
+            .clip(RoundedCornerShape(18.dp))
+            .background(Color.White)
+            .border(1.5.dp, FoundryColors.InkPrimary, RoundedCornerShape(18.dp))
+            .padding(12.dp),
+    ) {
+        Text(
+            text = "Modifier votre message",
+            fontSize = 11.5.sp,
+            fontWeight = FontWeight.SemiBold,
+            color = FoundryColors.InkSecondary,
+        )
+        Spacer(Modifier.height(6.dp))
+        BasicTextField(
+            value = draft,
+            onValueChange = onDraftChange,
+            textStyle = TextStyle(
+                color = FoundryColors.InkPrimary,
+                fontSize = 14.5.sp,
+                lineHeight = 20.sp,
+            ),
+            cursorBrush = SolidColor(FoundryColors.InkPrimary),
+            modifier = Modifier
+                .fillMaxWidth()
+                .heightIn(min = 48.dp)
+                .clip(RoundedCornerShape(12.dp))
+                .background(FoundryColors.SidebarBg)
+                .padding(horizontal = 10.dp, vertical = 8.dp),
+        )
+        Spacer(Modifier.height(10.dp))
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.End,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Box(
+                modifier = Modifier
+                    .heightIn(min = 40.dp)
+                    .clip(RoundedCornerShape(999.dp))
+                    .background(FoundryColors.SoftSurface)
+                    .clickable { onCancel() }
+                    .padding(horizontal = 14.dp, vertical = 8.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    text = "Annuler",
+                    fontSize = 12.5.sp,
+                    fontWeight = FontWeight.Medium,
+                    color = FoundryColors.InkPrimary,
+                )
+            }
+            Spacer(Modifier.width(8.dp))
+            val canSave = draft.isNotBlank()
+            Box(
+                modifier = Modifier
+                    .heightIn(min = 40.dp)
+                    .clip(RoundedCornerShape(999.dp))
+                    .background(if (canSave) FoundryColors.InkPrimary else FoundryColors.SoftSurface)
+                    .clickable(enabled = canSave) { onSave() }
+                    .padding(horizontal = 16.dp, vertical = 8.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    text = "Envoyer",
+                    fontSize = 12.5.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = if (canSave) Color.White else FoundryColors.InkMuted,
+                )
+            }
         }
     }
 }

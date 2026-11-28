@@ -29,6 +29,10 @@
 - [x] **Backend Python (`backend/`)** : 5/5 tests `pytest` verts.
 - [x] **FreeLLMAPI (`freellmapi`) + Pool Modèles Gratuits (`v0.7.0`)** :
   - Fournisseur natif `freellmapi` avec URL de passerelle configurable (défaut `http://127.0.0.1:3001`), jeton Bearer optionnel en local, filtre automatique sur `available == true`, badge `FREE`, épingle `auto` / `fusion` et activation automatique du routeur gratuit.
+- [x] **Choix Interactifs en 1 Clic, Réponses Concises & Contrôles ChatGPT (`v0.9.0`)** :
+  - `ChoiceExtractor.kt` + `AutonomousEngine.kt` : réponses normales brèves et directes (2–4 phrases) + protocole structuré `{"action":"choices","reply":"...","choices":[...]}` (et détection automatique sécurisée sur les questions à options numérotées/lettrées).
+  - `InteractiveChoicesCard` (`VideoCards.kt`) : cartes d'options cliquables en un tap (cibles tactiles Android ≥ 48dp, sélection persistée en SQLite avec badge `Choisi`, envoi automatique du choix au CEO).
+  - Contrôles par message (`MainApp.kt` + `LocalDatabase.kt`) : **Copier** (presse-papiers + retour visuel/haptique) et **Modifier & renvoyer** (édition inline avec recalcul propre de la suite) sur les messages utilisateur ; **Copier** et **Régénérer** sur les réponses IA.
 - [x] **Exécution Arrière-Plan Permanente & Continuité (`v0.8.0`)** :
   - `AgentExecutionService.kt` : Foreground Service `dataSync` avec `PARTIAL_WAKE_LOCK`, notification persistante et bouton `Stop`, protégeant l'exécution des bots lorsque l'application passe en arrière-plan ou que l'écran est verrouillé.
   - Bouton **Allow 24/7 / Exempt Battery** dans `Sheets.kt` (`ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`) + rafraîchissement automatique du chat pendant l'exécution en arrière-plan (`MainApp.kt`).

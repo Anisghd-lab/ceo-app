@@ -171,6 +171,36 @@ class FoundryRepository(private val context: Context) {
         )
     }
 
+    fun markMessageChoiceSelected(messageId: String, optionId: String) {
+        db.updateMessageChoiceSelection(messageId, optionId)
+    }
+
+    suspend fun editAndResendFounderMessage(
+        companyId: String,
+        messageId: String,
+        newText: String,
+        targetBotId: String? = null,
+        onStatusUpdate: suspend (String) -> Unit = {},
+    ) {
+        engine.editAndResendMessage(
+            companyId = companyId,
+            messageId = messageId,
+            newText = newText,
+            targetBotId = targetBotId,
+            onStatusUpdate = onStatusUpdate,
+        )
+    }
+
+    suspend fun regenerateBotMessage(
+        companyId: String,
+        botMessageId: String,
+        onStatusUpdate: suspend (String) -> Unit = {},
+    ): Boolean = engine.regenerateResponse(
+        companyId = companyId,
+        botMessageId = botMessageId,
+        onStatusUpdate = onStatusUpdate,
+    )
+
     fun requestBoardMeeting(companyId: String): BoardMeetingData = engine.generateBoardMeeting(companyId)
 
     suspend fun decideApproval(approvalId: String, decision: String, device: String = "Android", feedback: String = ""): ApprovalItem? =

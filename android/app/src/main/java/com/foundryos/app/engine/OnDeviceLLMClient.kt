@@ -523,31 +523,91 @@ class OnDeviceLLMClient(context: Context) {
             .put("messages", msgArray)
             .put("temperature", 0.3)
             .put("max_tokens", maxTokens)
-        if (jsonMode && provider in listOf("openai", "openrouter", "deepseek", "groq", "gemini")) {
+        // OpenRouter free-tier router (`openrouter/free` / `:free`) often returns content=null with response_format=json_object
+        val useJsonObjectFormat = jsonMode &&
+            provider in listOf("openai", "openrouter", "deepseek", "groq", "gemini") &&
+            !(provider == "openrouter" && (model.contains(":free", true) || model.equals("openrouter/free", true)))
+        if (useJsonObjectFormat) {
             body.put("response_format", JSONObject().put("type", "json_object"))
         }
 
-        val reqBuilder = Request.Builder()
-            .url(url)
-            .header("Content-Type", "application/json")
-        if (apiKey.isNotBlank()) {
-            reqBuilder.header("Authorization", "Bearer $apiKey")
-        }
-        if (provider == "openrouter") {
-            reqBuilder.header("HTTP-Referer", "https://github.com/Anisghd-lab/ceo-app")
-            reqBuilder.header("X-Title", "CEO App")
+        fun executeOnce(reqBody: JSONObject): LLMCallResult {
+            val reqBuilder = Request.Builder()
+                .url(url)
+                .header("Content-Type", "application/json")
+            if (apiKey.isNotBlank()) {
+                reqBuilder.header("Authorization", "Bearer $apiKey")
+            }
+            if (provider == "openrouter") {
+                reqBuilder.header("HTTP-Referer", "https://github.com/Anisghd-lab/ceo-app")
+                reqBuilder.header("X-Title", "CEO App")
+            }
+            client.newCall(reqBuilder.post(reqBody.toString().toRequestBody(jsonMedia)).build()).execute().use { resp ->
+                val raw = resp.body?.string() ?: ""
+                if (!resp.isSuccessful) {
+                    return LLMCallResult(ok = false, provider = provider, model = model, error = "HTTP ${resp.code}: ${raw.take(220)}")
+                }
+                val json = runCatching { JSONObject(raw) }.getOrNull()
+                    ?: return LLMCallResult(ok = false, provider = provider, model = model, error = "Malformed JSON response from $provider")
+                val errObj = json.optJSONObject("error")
+                if (errObj != null) {
+                    return LLMCallResult(ok = false, provider = provider, model = model, error = errObj.optString("message").ifBlank { errObj.toString().take(200) })
+                }
+                val choice0 = json.optJSONArray("choices")?.optJSONObject(0)
+                    ?: return LLMCallResult(ok = false, provider = provider, model = model, error = "Empty choices from $provider/$model")
+                val msgObj = choice0.optJSONObject("message") ?: JSONObject()
+                val text = extractOpenAiMessageText(msgObj)
+                if (text.isBlank()) {
+                    return LLMCallResult(ok = false, provider = provider, model = model, error = "Model $provider/$model returned empty/null content")
+                }
+                val tokens = json.optJSONObject("usage")?.optInt("total_tokens", text.length / 4) ?: (text.length / 4)
+                return LLMCallResult(ok = true, content = text, provider = provider, model = model, tokensUsed = tokens)
+            }
         }
 
-        client.newCall(reqBuilder.post(body.toString().toRequestBody(jsonMedia)).build()).execute().use { resp ->
-            val raw = resp.body?.string() ?: ""
-            if (!resp.isSuccessful) {
-                return LLMCallResult(ok = false, provider = provider, model = model, error = "HTTP ${resp.code}: ${raw.take(220)}")
-            }
-            val json = JSONObject(raw)
-            val text = json.getJSONArray("choices").getJSONObject(0).getJSONObject("message").getString("content")
-            val tokens = json.optJSONObject("usage")?.optInt("total_tokens", text.length / 4) ?: (text.length / 4)
-            return LLMCallResult(ok = true, content = text, provider = provider, model = model, tokensUsed = tokens)
+        val first = executeOnce(body)
+        if (!first.ok && useJsonObjectFormat) {
+            body.remove("response_format")
+            val retry = executeOnce(body)
+            if (retry.ok) return retry
         }
+        return first
+    }
+
+    private fun extractOpenAiMessageText(msgObj: JSONObject): String {
+        val rawContent = if (msgObj.isNull("content")) null else msgObj.opt("content")
+        val primary = when (rawContent) {
+            is String -> rawContent.trim().takeUnless { it.equals("null", ignoreCase = true) }.orEmpty()
+            is JSONArray -> {
+                val sb = StringBuilder()
+                for (i in 0 until rawContent.length()) {
+                    val part = rawContent.opt(i)
+                    when (part) {
+                        is String -> sb.append(part)
+                        is JSONObject -> {
+                            val t = if (part.isNull("text")) "" else part.optString("text")
+                            if (t.isNotBlank() && !t.equals("null", ignoreCase = true)) sb.append(t)
+                        }
+                    }
+                }
+                sb.toString().trim()
+            }
+            else -> ""
+        }
+        if (primary.isNotBlank()) return primary
+
+        // Some reasoning models (DeepSeek/Qwen/OpenRouter free) emit text in reasoning_content or reasoning when content is null
+        for (key in listOf("reasoning_content", "reasoning", "text")) {
+            if (!msgObj.isNull(key)) {
+                val candidate = msgObj.optString(key).trim()
+                if (candidate.isNotBlank() && !candidate.equals("null", ignoreCase = true)) {
+                    // Prefer JSON block if present inside reasoning, else use reasoning text
+                    val extracted = extractJsonObject(candidate)
+                    return extracted?.toString() ?: candidate
+                }
+            }
+        }
+        return ""
     }
 
     private fun callAnthropic(

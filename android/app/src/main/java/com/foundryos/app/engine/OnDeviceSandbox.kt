@@ -183,16 +183,26 @@ class OnDeviceSandbox(private val context: Context) {
     /**
      * Packages multiple sandbox files into a clean .zip bundle in output/.
      */
-    fun createZipBundle(companyId: String, zipFilename: String, relPaths: List<String>): File {
+    fun createZipBundle(
+        companyId: String,
+        zipFilename: String,
+        relPaths: List<String>,
+        readmeText: String = "",
+    ): File {
         val cleanName = zipFilename.replace(Regex("[^a-zA-Z0-9._-]"), "_").let {
             if (it.endsWith(".zip", ignoreCase = true)) it else "$it.zip"
         }
         val outFile = resolveFile(companyId, "output/$cleanName")
         outFile.parentFile?.mkdirs()
         ZipOutputStream(FileOutputStream(outFile)).use { zos ->
+            if (readmeText.isNotBlank()) {
+                zos.putNextEntry(ZipEntry("00_START_HERE.txt"))
+                zos.write(readmeText.toByteArray(Charsets.UTF_8))
+                zos.closeEntry()
+            }
             for (rel in relPaths) {
                 val f = resolveFile(companyId, rel)
-                if (f.exists() && f.isFile) {
+                if (f.exists() && f.isFile && f.canonicalPath != outFile.canonicalPath) {
                     zos.putNextEntry(ZipEntry(f.name))
                     zos.write(f.readBytes())
                     zos.closeEntry()
@@ -200,6 +210,87 @@ class OnDeviceSandbox(private val context: Context) {
             }
         }
         return outFile
+    }
+
+    fun createXlsx(companyId: String, filename: String, sheets: List<DigitalProductFactory.SheetSpec>): File {
+        val clean = filename.replace(Regex("[^a-zA-Z0-9._-]"), "_").let {
+            if (it.endsWith(".xlsx", ignoreCase = true)) it else "$it.xlsx"
+        }
+        return DigitalProductFactory.createXlsxWorkbook(resolveFile(companyId, "output/$clean"), sheets)
+    }
+
+    fun createPptx(
+        companyId: String,
+        filename: String,
+        title: String,
+        subtitle: String,
+        author: String,
+        theme: String,
+        slides: List<DigitalProductFactory.SlideSpec>,
+    ): File {
+        val clean = filename.replace(Regex("[^a-zA-Z0-9._-]"), "_").let {
+            if (it.endsWith(".pptx", ignoreCase = true)) it else "$it.pptx"
+        }
+        return DigitalProductFactory.createPptxDeck(resolveFile(companyId, "output/$clean"), title, subtitle, author, theme, slides)
+    }
+
+    fun createDocx(companyId: String, filename: String, title: String, subtitle: String, sections: List<Pair<String, String>>): File {
+        val clean = filename.replace(Regex("[^a-zA-Z0-9._-]"), "_").let {
+            if (it.endsWith(".docx", ignoreCase = true)) it else "$it.docx"
+        }
+        return DigitalProductFactory.createDocxDocument(resolveFile(companyId, "output/$clean"), title, subtitle, sections)
+    }
+
+    fun createPngGraphic(
+        companyId: String,
+        filename: String,
+        title: String,
+        subtitle: String,
+        badge: String = "",
+        bullets: List<String> = emptyList(),
+        priceTag: String = "",
+        theme: String = "executive",
+        widthPx: Int = 1200,
+        heightPx: Int = 1500,
+    ): File {
+        val clean = filename.replace(Regex("[^a-zA-Z0-9._-]"), "_").let {
+            if (it.endsWith(".png", ignoreCase = true)) it else "$it.png"
+        }
+        return DigitalProductFactory.createPngGraphic(
+            resolveFile(companyId, "output/$clean"),
+            title, subtitle, badge, bullets, priceTag, theme, widthPx, heightPx,
+        )
+    }
+
+    fun createCsv(companyId: String, filename: String, headers: List<String>, rows: List<List<String>>): File {
+        val clean = filename.replace(Regex("[^a-zA-Z0-9._-]"), "_").let {
+            if (it.endsWith(".csv", ignoreCase = true)) it else "$it.csv"
+        }
+        return DigitalProductFactory.createCsvDataset(resolveFile(companyId, "output/$clean"), headers, rows)
+    }
+
+    fun createNotionPack(
+        companyId: String,
+        filename: String,
+        packTitle: String,
+        setupGuide: String,
+        pages: List<Pair<String, String>>,
+        databases: List<DigitalProductFactory.SheetSpec>,
+    ): File {
+        val clean = filename.replace(Regex("[^a-zA-Z0-9._-]"), "_").let {
+            if (it.endsWith(".zip", ignoreCase = true)) it else "${it}_notion_pack.zip"
+        }
+        return DigitalProductFactory.createNotionTemplatePack(
+            resolveFile(companyId, "output/$clean"),
+            packTitle, setupGuide, pages, databases,
+        )
+    }
+
+    fun createWebApp(companyId: String, filename: String, title: String, subtitle: String, html: String, theme: String): File {
+        val clean = filename.replace(Regex("[^a-zA-Z0-9._-]"), "_").let {
+            if (it.endsWith(".html", ignoreCase = true)) it else "$it.html"
+        }
+        return DigitalProductFactory.createInteractiveWebApp(resolveFile(companyId, "output/$clean"), title, subtitle, html, theme)
     }
 
     fun sandboxesBaseDir(): File = rootDir
@@ -210,7 +301,7 @@ class OnDeviceSandbox(private val context: Context) {
     }
 
     /**
-     * Real programmatic QA check on any generated artifact in the sandbox.
+     * Real programmatic QA check on any generated sellable digital artifact in the sandbox.
      */
     fun verifyArtifactProgrammatically(companyId: String, relPath: String): QaAuditResult {
         val file = resolveFile(companyId, relPath)
@@ -218,26 +309,75 @@ class OnDeviceSandbox(private val context: Context) {
             return QaAuditResult(false, 20, "Missing file in sandbox: $relPath")
         }
         val bytes = file.readBytes()
-        if (bytes.size < 120) {
+        if (bytes.size < 64) {
             return QaAuditResult(false, 40, "File too small (${bytes.size} bytes) — incomplete output")
         }
         val lower = file.name.lowercase()
+        val isZipHeader = bytes.size >= 4 && bytes[0] == 0x50.toByte() && bytes[1] == 0x4B.toByte()
+        fun zipEntryNames(): Set<String> = runCatching {
+            val names = mutableSetOf<String>()
+            java.util.zip.ZipFile(file).use { zf ->
+                val en = zf.entries()
+                while (en.hasMoreElements()) names.add(en.nextElement().name)
+            }
+            names
+        }.getOrDefault(emptySet())
+
         return when {
             lower.endsWith(".pdf") -> {
                 val isPdf = bytes.size > 500 && String(bytes.copyOfRange(0, minOf(8, bytes.size))).startsWith("%PDF")
                 if (isPdf) QaAuditResult(true, 94, "Valid PDF verified in sandbox (${bytes.size} bytes)")
                 else QaAuditResult(false, 35, "Invalid PDF header")
             }
+            lower.endsWith(".xlsx") -> {
+                val entries = if (isZipHeader) zipEntryNames() else emptySet()
+                if ("xl/workbook.xml" in entries && entries.any { it.startsWith("xl/worksheets/sheet") }) {
+                    val sheetCount = entries.count { it.startsWith("xl/worksheets/sheet") }
+                    QaAuditResult(true, 95, "Valid Excel/Sheets .xlsx workbook verified ($sheetCount sheets, ${bytes.size} bytes)")
+                } else QaAuditResult(false, 35, "Corrupted or incomplete .xlsx workbook")
+            }
+            lower.endsWith(".pptx") -> {
+                val entries = if (isZipHeader) zipEntryNames() else emptySet()
+                if ("ppt/presentation.xml" in entries && entries.any { it.startsWith("ppt/slides/slide") }) {
+                    val slideCount = entries.count { it.startsWith("ppt/slides/slide") }
+                    QaAuditResult(true, 95, "Valid PowerPoint/Slides .pptx deck verified ($slideCount slides, ${bytes.size} bytes)")
+                } else QaAuditResult(false, 35, "Corrupted or incomplete .pptx presentation")
+            }
+            lower.endsWith(".docx") -> {
+                val entries = if (isZipHeader) zipEntryNames() else emptySet()
+                if ("word/document.xml" in entries) {
+                    QaAuditResult(true, 94, "Valid Word/Docs .docx template verified (${bytes.size} bytes)")
+                } else QaAuditResult(false, 35, "Corrupted or incomplete .docx document")
+            }
+            lower.endsWith(".png") -> {
+                val isPng = bytes.size >= 8 &&
+                    bytes[0] == 0x89.toByte() && bytes[1] == 0x50.toByte() &&
+                    bytes[2] == 0x4E.toByte() && bytes[3] == 0x47.toByte()
+                if (isPng) QaAuditResult(true, 94, "Valid high-res PNG graphic verified (${bytes.size} bytes)")
+                else QaAuditResult(false, 35, "Invalid PNG header")
+            }
             lower.endsWith(".zip") -> {
-                val isZip = bytes.size >= 4 && bytes[0] == 0x50.toByte() && bytes[1] == 0x4B.toByte()
-                if (isZip) QaAuditResult(true, 93, "Valid ZIP archive verified (${bytes.size} bytes)")
-                else QaAuditResult(false, 35, "Corrupted ZIP header")
+                val entries = if (isZipHeader) zipEntryNames() else emptySet()
+                if (isZipHeader && entries.isNotEmpty()) {
+                    QaAuditResult(true, 94, "Valid ZIP bundle verified (${entries.size} files, ${bytes.size} bytes)")
+                } else QaAuditResult(false, 35, "Empty or corrupted ZIP archive")
+            }
+            lower.endsWith(".csv") -> {
+                val lineCount = String(bytes, Charsets.UTF_8).lines().count { it.isNotBlank() }
+                if (lineCount >= 2) QaAuditResult(true, 93, "Valid CSV dataset verified ($lineCount rows, ${bytes.size} bytes)")
+                else QaAuditResult(false, 50, "CSV dataset has fewer than 2 rows")
             }
             lower.endsWith(".svg") -> {
                 val text = String(bytes, Charsets.UTF_8)
                 val isSvg = text.contains("<svg", ignoreCase = true) && bytes.size >= 120
                 if (isSvg) QaAuditResult(true, 93, "Valid SVG vector graphic verified (${bytes.size} bytes)")
                 else QaAuditResult(false, 45, "Invalid or empty SVG graphic")
+            }
+            lower.endsWith(".html") -> {
+                val text = String(bytes, Charsets.UTF_8)
+                val okHtml = text.contains("<html", ignoreCase = true) || text.contains("<body", ignoreCase = true) || text.contains("<div", ignoreCase = true)
+                if (okHtml && bytes.size >= 200) QaAuditResult(true, 94, "Valid interactive HTML5 app/page verified (${bytes.size} bytes)")
+                else QaAuditResult(false, 45, "Incomplete HTML deliverable")
             }
             else -> {
                 val text = String(bytes, Charsets.UTF_8)

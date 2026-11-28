@@ -475,7 +475,14 @@ class AutonomousEngine(
     private val atomicTools = listOf(
         "sandbox_files",
         "create_pdf",
+        "create_xlsx",
+        "create_pptx",
+        "create_docx",
+        "create_png_graphic",
         "create_svg_graphic",
+        "create_web_app",
+        "create_notion_pack",
+        "create_csv_dataset",
         "create_zip",
         "web_fetch",
         "company_memory",
@@ -491,7 +498,8 @@ class AutonomousEngine(
             Nothing is hardcoded by industry. The human described a new company to launch:
             "$description"
 
-            Design the exact team of specialist bots (3 to 8 bots, NOT counting the CEO which is added automatically), splitting distinct functions cleanly (e.g. Trend Hunter, Data/Content Researcher, Visuals & Charts Designer, Core Builder, Independent Quality Auditor, Marketing/Video Studio, Social & 24/7 Customer Care/Sales Operator when relevant to the objective).
+            Design the exact team of specialist bots (3 to 8 bots, NOT counting the CEO which is added automatically), splitting distinct functions cleanly (e.g. Market & Niche Analyst, Data/Content Researcher, Multi-Format Product Producer for spreadsheets/slides/docs/Notion/books/apps, Visuals & Mockups Designer, Independent Quality Auditor, Marketing/Video Studio, Social & 24/7 Customer Care/Sales Operator when relevant to the objective).
+            ${DigitalProductSkills.marketCapabilitiesPrompt()}
             ${pluginExecutor?.activeToolsSummaryForPrompt().orEmpty()}
             Rules:
             - Output strictly ONE JSON object.
@@ -694,10 +702,10 @@ class AutonomousEngine(
                             .put("is_qa", false),
                         JSONObject()
                             .put("name", "Creator")
-                            .put("role", "Core Deliverable Production")
-                            .put("tagline", "Builds verified assets")
-                            .put("system_prompt", "Produce high-value deliverables (PDFs, guides, templates, code, bundles) for '$clean' inside output/.")
-                            .put("allowed_tools", JSONArray(listOf("sandbox_files", "create_pdf", "create_zip", "artifact_publish", "company_memory")))
+                            .put("role", "Multi-Format Digital Product Producer")
+                            .put("tagline", "Builds sellable digital assets")
+                            .put("system_prompt", "Produce complete sellable digital products (Excel/Sheets .xlsx trackers, PowerPoint .pptx decks, Word .docx templates, Notion packs, interactive HTML apps, high-res PNG covers, illustrated PDFs & ZIP bundles) for '$clean' inside output/.")
+                            .put("allowed_tools", JSONArray(listOf("sandbox_files", "create_pdf", "create_xlsx", "create_pptx", "create_docx", "create_png_graphic", "create_svg_graphic", "create_web_app", "create_notion_pack", "create_csv_dataset", "create_zip", "artifact_publish", "company_memory")))
                             .put("is_qa", false),
                         JSONObject()
                             .put("name", "Quality Auditor")
@@ -1106,7 +1114,8 @@ class AutonomousEngine(
               {"action":"tool","tool":"assign_bot_prompt","args":{"bot_name":"Builder","role":"...","system_prompt":"..."}}
             - You CAN call any connected Plugin or Sandbox tool directly before answering by outputting ONE JSON object:
               {"action":"tool","tool":"<tool_name>","args":{...}}
-              Supported sandbox tools: list_files, read_file, write_file, create_pdf, create_zip, product_design_prototype, assign_bot_prompt.
+              Supported sandbox tools: list_files, read_file, write_file, create_pdf, create_xlsx, create_pptx, create_docx, create_png_graphic, create_svg_graphic, create_web_app, create_notion_pack, create_csv_dataset, create_zip, product_design_prototype, assign_bot_prompt.
+              ${DigitalProductSkills.marketCapabilitiesPrompt()}
               Or ANY connected plugin tool above (browser_search, browser_read_url, notion_search, github_list_repos, slack_list_channels, gmail_search, gdrive_search, figma_get_file, canva_list_designs, scite_search, tinyfish_extract, etc.).
             - ONLY if the Founder wants a full multi-bot pipeline producing deliverables with QA + Approval, output:
               {"action":"run_mission","title":"Short mission title","goal":"Detailed mission goal","ceo_reply":"Brief 1-2 sentence CEO plan","bot_mandates":{"Strategist":"Tailored mission directive aligned with role & objective","Builder":"Tailored mission directive"}}
@@ -1567,7 +1576,10 @@ class AutonomousEngine(
                 runProducerAgentLoop(comp, producerBot, missionId, title, goal, scopedSpec, onStatusUpdate)
             }
             if (!prodOk) return
-            val diskAfterProducer = harvestNativeCliArtifacts(comp.id, producerBot.name, seenOutBeforeProducer)
+            val diskAfterProducer = run {
+                prodBuilt?.forEach { seenOutBeforeProducer.add(it.filename) }
+                harvestNativeCliArtifacts(comp.id, producerBot.name, seenOutBeforeProducer)
+            }
             if (prodBuilt != null || diskAfterProducer.isNotEmpty()) {
                 val merged = ((prodBuilt ?: emptyList()) + diskAfterProducer).distinctBy { it.relPath }
                 if (merged.isNotEmpty()) {
@@ -1880,22 +1892,28 @@ class AutonomousEngine(
             You work inside an isolated Android sandbox (${compRoot.absolutePath}).
             ${buildSharedTeamContext(comp.id)}
             CRITICAL AUTHORING RULE:
-            - You are creating REAL, COMPLETE, SELLABLE customer-facing deliverables (full multi-chapter illustrated books, workbooks, planners, interactive HTML pages, SVG graphics, ZIP bundles).
-            - NEVER copy-paste or echo the Mission Brief or Scope as the PDF content! Write original, comprehensive, publication-grade chapters (at least 5 to 8 rich chapters for books/guides/workbooks) with real frameworks, concrete step-by-step instructions, markdown subheadings (###), **bold highlights**, printable checklists (- [ ]), callout quotes (> ...), markdown tables (| Col 1 | Col 2 |), fill-in worksheet lines (___), and an `illustration` vector chart/diagram per chapter.
+            - You are creating REAL, COMPLETE, SELLABLE customer-facing digital products — NOT limited to PDFs! Choose the highest-value commercial formats for the target niche & market:
+            ${DigitalProductSkills.marketCapabilitiesPrompt()}
+            - NEVER copy-paste or echo the Mission Brief or Scope as product content! Write original, comprehensive, customer-ready content. For books/guides/workbooks (`create_pdf`), author 5–8 rich chapters with markdown subheadings (###), **bold**, printable checkboxes (- [ ]), callout quotes (> ...), tables (|...|), worksheet lines (___), and an `illustration` vector chart/diagram per chapter. For spreadsheets (`create_xlsx`), include multiple tabs with real Excel formulas (=SUM, =AVERAGE, =B2-C2). For slides (`create_pptx`), author 6–10 structured slides with KPI callouts. For editable templates (`create_docx`), author ready-to-customize sections. For Notion (`create_notion_pack`), include structured Markdown pages + CSV databases. Always create a crisp cover/listing graphic (`create_png_graphic`) and package everything cleanly (`create_zip`) when shipping a bundle!
             Reply strictly with ONE JSON object per step:
-            - Create a complete illustrated book/workbook PDF:
-              {"action": "tool", "tool": "create_pdf", "args": {"filename": "${slugify(title)}.pdf", "title": "Book Title", "subtitle": "Compelling Subtitle", "author": "${comp.name}", "edition_badge": "COMPLETE EDITION", "theme": "executive|emerald|editorial|minimal|wellness", "highlights": ["Key highlight 1", "Key highlight 2", "Key highlight 3", "Key highlight 4"], "chapters": [{"heading": "Chapter Title", "summary": "1-sentence takeaway", "body": "### Subheading\nRich content with **bold**, - bullets, - [ ] checkboxes, > callouts, | Tables |, and ___ worksheet lines.", "illustration": {"type": "bar_chart|roadmap|kpi_grid|framework|habit_tracker|checklist_card", "title": "Visual Diagram Title", "items": [{"label": "Item", "value": 85, "detail": "85%"}]}}]}}
+            - Call 1 tool: {"action": "tool", "tool": "<tool_name>", "args": {...}}
             - Call multiple tools at once: {"action": "tools", "calls": [{"tool": "...", "args": {...}}]}
-              Sandbox tools:
-              * "list_files": {}
-              * "read_file": {"rel_path": "workspace/uploads/file.txt"}
-              * "write_file": {"rel_path": "output/file.md", "content": "..."}
+              Sellable Product & Sandbox Tools:
+              * "create_pdf": {"filename": "${slugify(title)}.pdf", "title": "...", "subtitle": "...", "author": "${comp.name}", "edition_badge": "COMPLETE EDITION", "theme": "executive|emerald|editorial|minimal|wellness", "highlights": ["..."], "chapters": [{"heading": "...", "summary": "...", "body": "...", "illustration": {"type": "bar_chart|roadmap|kpi_grid|framework|habit_tracker|checklist_card", "title": "...", "items": [{"label": "...", "value": 85, "detail": "85%"}]}}]}
+              * "create_xlsx": {"filename": "${slugify(title)}.xlsx", "sheets": [{"name": "Dashboard", "headers": ["Category", "Budget", "Actual", "Diff"], "rows": [["Housing", "1500", "1450", "=B2-C2"], ["Total", "=SUM(B2:B2)", "=SUM(C2:C2)", "=SUM(D2:D2)"]]}]}
+              * "create_pptx": {"filename": "${slugify(title)}.pptx", "title": "...", "subtitle": "...", "theme": "executive|emerald|editorial|minimal|wellness", "slides": [{"title": "...", "subtitle": "...", "bullets": ["..."], "highlight_stat": "92%", "highlight_label": "..."}]}
+              * "create_docx": {"filename": "${slugify(title)}.docx", "title": "...", "subtitle": "...", "sections": [{"heading": "...", "body": "..."}]}
+              * "create_png_graphic": {"filename": "cover_mockup.png", "title": "...", "subtitle": "...", "badge": "2027 BUNDLE", "bullets": ["..."], "price_tag": "$29", "theme": "wellness", "width": 1200, "height": 1500}
+              * "create_notion_pack": {"filename": "${slugify(title)}_notion_pack.zip", "title": "...", "setup_guide": "...", "pages": [{"title": "...", "body": "..."}], "databases": [{"name": "Tasks", "headers": ["Task", "Status", "Priority"], "rows": [["Define Q1 goals", "To Do", "High"]]}]}
+              * "create_csv_dataset": {"filename": "dataset.csv", "headers": ["..."], "rows": [["..."]]}
+              * "create_web_app": {"filename": "app.html", "title": "...", "subtitle": "...", "theme": "minimal", "html": "<!DOCTYPE html>..."}
               * "create_svg_graphic": {"filename": "chart.svg", "title": "...", "svg": "<svg ...>...</svg>"}
-              * "create_zip": {"zip_filename": "bundle.zip", "rel_paths": ["output/file1.pdf", "output/file2.md"]}
+              * "create_zip": {"zip_filename": "${slugify(title)}_bundle.zip", "rel_paths": [], "readme": "Thank you for purchasing..."}
+              * "list_files": {} | "read_file": {"rel_path": "..."} | "write_file": {"rel_path": "output/...", "content": "..."}
               * "product_design_prototype": {"filename": "prototype.html", "title": "...", "html": "..."}
               Or ANY connected plugin tool above!
             - Finish once deliverables exist in output/:
-              {"action": "final", "summary": "...", "primary_rel_path": "output/${slugify(title)}.pdf"}
+              {"action": "final", "summary": "...", "primary_rel_path": "output/..."}
         """.trimIndent()
 
         val promptHistory = mutableListOf("Mission: $title\nGoal: $goal\nSpec:\n$spec")
@@ -2300,7 +2318,7 @@ class AutonomousEngine(
                 JSONObject().put("ok", true).put("rel_path", rel).put("bytes", file.length()).toString() to art
             }
             "create_zip" -> {
-                val zName = args.optString("zip_filename").ifBlank { "${slugify(comp.name)}_pack.zip" }
+                val zName = args.optString("zip_filename").ifBlank { args.optString("filename") }.ifBlank { "${slugify(comp.name)}_pack.zip" }
                 val arr = args.optJSONArray("rel_paths") ?: JSONArray()
                 val requestedPaths = (0 until arr.length()).map { arr.optString(it) }.filter { it.isNotBlank() }
                 val paths = requestedPaths.ifEmpty {
@@ -2308,8 +2326,122 @@ class AutonomousEngine(
                         .filterNot { it.name.endsWith(".zip", ignoreCase = true) }
                         .map { "output/${it.name}" }
                 }
-                val file = sandbox.createZipBundle(comp.id, zName, paths)
-                val art = registerArtifact(comp.id, bot.name, zName, file, "Packaged ZIP (${paths.size} files)")
+                val readme = args.optString("readme").trim().ifBlank {
+                    "Thank you for purchasing from ${comp.name}!\n\nIncluded files:\n" +
+                        paths.joinToString("\n") { "- ${it.substringAfterLast('/')}" }
+                }
+                val file = sandbox.createZipBundle(comp.id, zName, paths, readmeText = readme)
+                val art = registerArtifact(comp.id, bot.name, zName, file, "Sellable ZIP bundle (${paths.size} files)")
+                JSONObject().put("ok", true).put("rel_path", art.relPath).put("bytes", art.sizeBytes).toString() to art
+            }
+            "create_xlsx" -> {
+                val fn = args.optString("filename").ifBlank { "${slugify(comp.name)}_tracker.xlsx" }
+                val sheets = DigitalProductFactory.parseSheetsFromJson(args.optJSONArray("sheets"))
+                    .ifEmpty {
+                        val hArr = args.optJSONArray("headers") ?: JSONArray()
+                        val rArr = args.optJSONArray("rows") ?: JSONArray()
+                        val headers = (0 until hArr.length()).map { hArr.optString(it) }.ifEmpty { listOf("Item", "Category", "Amount") }
+                        val rows = (0 until rArr.length()).mapNotNull { rIdx ->
+                            val row = rArr.optJSONArray(rIdx) ?: return@mapNotNull null
+                            (0 until row.length()).map { cIdx -> row.opt(cIdx)?.toString().orEmpty() }
+                        }
+                        listOf(DigitalProductFactory.SheetSpec(args.optString("sheet_name", "Sheet1"), headers, rows))
+                    }
+                val file = sandbox.createXlsx(comp.id, fn, sheets)
+                val art = registerArtifact(comp.id, bot.name, args.optString("title").ifBlank { file.nameWithoutExtension }, file, "Excel/Sheets workbook (${sheets.size} sheets)")
+                JSONObject().put("ok", true).put("rel_path", art.relPath).put("bytes", art.sizeBytes).put("sheets", sheets.size).toString() to art
+            }
+            "create_pptx" -> {
+                val fn = args.optString("filename").ifBlank { "${slugify(comp.name)}_deck.pptx" }
+                val deckTitle = args.optString("title").ifBlank { comp.name }
+                val deckSub = args.optString("subtitle").ifBlank { "Presentation · ${comp.name}" }
+                val theme = args.optString("theme").ifBlank { PdfBookRenderer.inferTheme(deckTitle, deckSub) }
+                val sArr = args.optJSONArray("slides") ?: JSONArray()
+                val slides = (0 until sArr.length()).mapNotNull { i ->
+                    val o = sArr.optJSONObject(i) ?: return@mapNotNull null
+                    val bArr = o.optJSONArray("bullets") ?: o.optJSONArray("points") ?: JSONArray()
+                    val bullets = (0 until bArr.length()).map { bArr.optString(it) }.filter { it.isNotBlank() }
+                    DigitalProductFactory.SlideSpec(
+                        title = o.optString("title", "Slide ${i + 1}"),
+                        subtitle = o.optString("subtitle"),
+                        bullets = bullets,
+                        highlightStat = o.optString("highlight_stat").ifBlank { o.optString("stat") },
+                        highlightLabel = o.optString("highlight_label").ifBlank { o.optString("stat_label") },
+                    )
+                }.ifEmpty {
+                    listOf(DigitalProductFactory.SlideSpec("Overview", deckSub, listOf(comp.description)))
+                }
+                val file = sandbox.createPptx(comp.id, fn, deckTitle, deckSub, comp.name, theme, slides)
+                val art = registerArtifact(comp.id, bot.name, deckTitle, file, "PowerPoint/Slides deck (${slides.size + 1} slides)")
+                JSONObject().put("ok", true).put("rel_path", art.relPath).put("bytes", art.sizeBytes).put("slides", slides.size + 1).toString() to art
+            }
+            "create_docx" -> {
+                val fn = args.optString("filename").ifBlank { "${slugify(comp.name)}_template.docx" }
+                val docTitle = args.optString("title").ifBlank { comp.name }
+                val docSub = args.optString("subtitle").ifBlank { "Editable Template · ${comp.name}" }
+                val secArr = args.optJSONArray("sections") ?: args.optJSONArray("chapters") ?: JSONArray()
+                val sections = (0 until secArr.length()).mapNotNull { i ->
+                    val o = secArr.optJSONObject(i) ?: return@mapNotNull null
+                    val h = o.optString("heading").ifBlank { o.optString("title", "Section ${i + 1}") }
+                    val b = o.optString("body").ifBlank { o.optString("content", "") }
+                    h to b
+                }.ifEmpty {
+                    listOf("Overview" to args.optString("content", comp.description))
+                }
+                val file = sandbox.createDocx(comp.id, fn, docTitle, docSub, sections)
+                val art = registerArtifact(comp.id, bot.name, docTitle, file, "Word/Docs editable template (${sections.size} sections)")
+                JSONObject().put("ok", true).put("rel_path", art.relPath).put("bytes", art.sizeBytes).toString() to art
+            }
+            "create_png_graphic" -> {
+                val fn = args.optString("filename").ifBlank { "${slugify(comp.name)}_cover.png" }
+                val gTitle = args.optString("title").ifBlank { comp.name }
+                val gSub = args.optString("subtitle")
+                val badge = args.optString("badge")
+                val bArr = args.optJSONArray("bullets") ?: args.optJSONArray("highlights") ?: JSONArray()
+                val bullets = (0 until bArr.length()).map { bArr.optString(it) }.filter { it.isNotBlank() }
+                val priceTag = args.optString("price_tag")
+                val theme = args.optString("theme").ifBlank { PdfBookRenderer.inferTheme(gTitle, gSub) }
+                val w = args.optInt("width", 1200)
+                val h = args.optInt("height", 1500)
+                val file = sandbox.createPngGraphic(comp.id, fn, gTitle, gSub, badge, bullets, priceTag, theme, w, h)
+                val art = registerArtifact(comp.id, bot.name, gTitle, file, "High-res PNG cover/graphic (${w}x${h})")
+                JSONObject().put("ok", true).put("rel_path", art.relPath).put("bytes", art.sizeBytes).toString() to art
+            }
+            "create_notion_pack" -> {
+                val fn = args.optString("filename").ifBlank { "${slugify(comp.name)}_notion_pack.zip" }
+                val pTitle = args.optString("title").ifBlank { "${comp.name} Notion OS" }
+                val guide = args.optString("setup_guide")
+                val pArr = args.optJSONArray("pages") ?: JSONArray()
+                val pages = (0 until pArr.length()).mapNotNull { i ->
+                    val o = pArr.optJSONObject(i) ?: return@mapNotNull null
+                    o.optString("title", "Page ${i + 1}") to o.optString("body").ifBlank { o.optString("content", "") }
+                }
+                val dbs = DigitalProductFactory.parseSheetsFromJson(args.optJSONArray("databases"))
+                val file = sandbox.createNotionPack(comp.id, fn, pTitle, guide, pages, dbs)
+                val art = registerArtifact(comp.id, bot.name, pTitle, file, "Notion template pack (${pages.size} pages, ${dbs.size} DBs)")
+                JSONObject().put("ok", true).put("rel_path", art.relPath).put("bytes", art.sizeBytes).toString() to art
+            }
+            "create_csv_dataset" -> {
+                val fn = args.optString("filename").ifBlank { "${slugify(comp.name)}_dataset.csv" }
+                val hArr = args.optJSONArray("headers") ?: args.optJSONArray("columns") ?: JSONArray()
+                val headers = (0 until hArr.length()).map { hArr.optString(it) }
+                val rArr = args.optJSONArray("rows") ?: JSONArray()
+                val rows = (0 until rArr.length()).mapNotNull { rIdx ->
+                    val row = rArr.optJSONArray(rIdx) ?: return@mapNotNull null
+                    (0 until row.length()).map { cIdx -> row.opt(cIdx)?.toString().orEmpty() }
+                }
+                val file = sandbox.createCsv(comp.id, fn, headers, rows)
+                val art = registerArtifact(comp.id, bot.name, args.optString("title").ifBlank { file.nameWithoutExtension }, file, "CSV dataset (${rows.size} rows)")
+                JSONObject().put("ok", true).put("rel_path", art.relPath).put("bytes", art.sizeBytes).toString() to art
+            }
+            "create_web_app" -> {
+                val fn = args.optString("filename").ifBlank { "${slugify(comp.name)}_app.html" }
+                val aTitle = args.optString("title").ifBlank { comp.name }
+                val aSub = args.optString("subtitle")
+                val theme = args.optString("theme").ifBlank { PdfBookRenderer.inferTheme(aTitle, aSub) }
+                val html = args.optString("html").ifBlank { args.optString("content", "<p>${comp.description}</p>") }
+                val file = sandbox.createWebApp(comp.id, fn, aTitle, aSub, html, theme)
+                val art = registerArtifact(comp.id, bot.name, aTitle, file, "Interactive HTML5 web app/template")
                 JSONObject().put("ok", true).put("rel_path", art.relPath).put("bytes", art.sizeBytes).toString() to art
             }
             "create_svg_graphic" -> {
@@ -2367,6 +2499,12 @@ class AutonomousEngine(
         val ext = file.extension.lowercase()
         val mime = MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext) ?: when (ext) {
             "pdf" -> "application/pdf"
+            "xlsx" -> "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            "pptx" -> "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+            "docx" -> "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+            "png" -> "image/png"
+            "csv" -> "text/csv"
+            "json" -> "application/json"
             "zip" -> "application/zip"
             "svg" -> "image/svg+xml"
             "html" -> "text/html"

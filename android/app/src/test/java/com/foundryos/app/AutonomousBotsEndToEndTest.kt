@@ -937,4 +937,189 @@ class AutonomousBotsEndToEndTest {
         val rawAscii = String(pdfFile.readBytes(), Charsets.ISO_8859_1)
         assertFalse("Must NOT contain offline API key placeholder when AI is active", rawAscii.contains("Add an LLM API key"))
     }
+
+    @Test
+    fun multiFormatDigitalProducts_buildsAndQaVerifiesXlsxPptxDocxPngNotionCsvHtmlAndZip() = runTest {
+        val cid = "cmp_multi_products"
+        db.insertCompany(
+            com.foundryos.app.data.CompanyItem(
+                id = cid,
+                name = "DigitalVault Studio",
+                description = "Create multi-format sellable digital products for Gumroad & Etsy",
+                missionStatement = "Produce real spreadsheets, slides, docs, Notion packs, PNG covers, apps & ZIP bundles",
+                status = "ACTIVE",
+                botsCount = 2,
+            )
+        )
+        db.insertBot(
+            com.foundryos.app.data.BotItem(
+                id = "b_ceo_mp", companyId = cid, name = "CEO", role = "CEO", tagline = "CEO",
+                systemPrompt = "Lead DigitalVault Studio",
+                allowedTools = com.foundryos.app.engine.DigitalProductSkills.ALL_PRODUCT_TOOLS,
+                isCeo = true,
+            )
+        )
+
+        // CEO executes a batch creating ALL sellable digital formats directly in sandbox output/
+        aiServer.enqueue(
+            openAiWrap(
+                """{
+                  "action": "tools",
+                  "calls": [
+                    {
+                      "tool": "create_xlsx",
+                      "args": {
+                        "filename": "2027_budget_tracker.xlsx",
+                        "title": "2027 Zero-Based Budget",
+                        "sheets": [
+                          {
+                            "name": "Monthly Budget",
+                            "headers": ["Category", "Planned", "Actual", "Difference"],
+                            "rows": [
+                              ["Housing", "1500", "1450", "=B2-C2"],
+                              ["Savings", "800", "900", "=B3-C3"],
+                              ["Total", "=SUM(B2:B3)", "=SUM(C2:C3)", "=SUM(D2:D3)"]
+                            ]
+                          }
+                        ]
+                      }
+                    },
+                    {
+                      "tool": "create_pptx",
+                      "args": {
+                        "filename": "launch_course_deck.pptx",
+                        "title": "2027 Reset Workshop",
+                        "subtitle": "Interactive Slide Deck",
+                        "theme": "wellness",
+                        "slides": [
+                          {"title": "Module 1: Clarity", "bullets": ["Audit 2026 wins", "Define 3 annual pillars"], "highlight_stat": "90 Days", "highlight_label": "Sprint Cycle"}
+                        ]
+                      }
+                    },
+                    {
+                      "tool": "create_docx",
+                      "args": {
+                        "filename": "client_contract_template.docx",
+                        "title": "Freelance Service Agreement",
+                        "subtitle": "Editable Word & Google Docs Template",
+                        "sections": [
+                          {"heading": "1. Scope of Work", "body": "Deliverables and milestones agreed between Client and Freelancer."}
+                        ]
+                      }
+                    },
+                    {
+                      "tool": "create_png_graphic",
+                      "args": {
+                        "filename": "etsy_bundle_cover.png",
+                        "title": "2027 Reset Bundle",
+                        "subtitle": "Spreadsheets · Notion · Workbook",
+                        "badge": "INSTANT DOWNLOAD",
+                        "bullets": ["Excel + Google Sheets", "Notion OS Pack", "Printable Workbook"],
+                        "price_tag": "$29",
+                        "theme": "emerald"
+                      }
+                    },
+                    {
+                      "tool": "create_notion_pack",
+                      "args": {
+                        "filename": "life_os_notion.zip",
+                        "title": "2027 Life OS",
+                        "setup_guide": "Import directly via Settings -> Import -> Markdown & CSV.",
+                        "pages": [{"title": "Dashboard", "body": "Welcome to your 2027 Life OS."}],
+                        "databases": [{"name": "Goals", "headers": ["Goal", "Quarter", "Status"], "rows": [["Save $10k", "Q1", "In Progress"]]}]
+                      }
+                    },
+                    {
+                      "tool": "create_web_app",
+                      "args": {
+                        "filename": "budget_calculator.html",
+                        "title": "Interactive Budget Calculator",
+                        "subtitle": "50/30/20 Live Split",
+                        "theme": "emerald",
+                        "html": "<h2>50/30/20 Calculator</h2><p>Enter your monthly income to split needs, wants, and savings instantly.</p>"
+                      }
+                    }
+                  ]
+                }""".trimIndent()
+            )
+        )
+        aiServer.enqueue(
+            openAiWrap(
+                """{
+                  "action": "tools",
+                  "calls": [
+                    {
+                      "tool": "create_csv_dataset",
+                      "args": {
+                        "filename": "ai_prompts_pack.csv",
+                        "headers": ["Category", "Prompt", "Use Case"],
+                        "rows": [
+                          ["Marketing", "Write 5 hooks for TikTok", "Launch"],
+                          ["Finance", "Analyze monthly burn rate", "Budgeting"]
+                        ]
+                      }
+                    },
+                    {
+                      "tool": "create_zip",
+                      "args": {
+                        "zip_filename": "2027_complete_customer_bundle.zip",
+                        "rel_paths": []
+                      }
+                    }
+                  ]
+                }""".trimIndent()
+            )
+        )
+        aiServer.enqueue(openAiWrap("""{"action":"final","reply":"Pack multi-formats complet créé : XLSX, PPTX, DOCX, PNG, Notion, HTML, CSV et ZIP."}"""))
+
+        engine.handleFounderMessage(cid, "Crée un bundle numérique multi-formats complet prêt à vendre")
+
+        val expectedFiles = listOf(
+            "output/2027_budget_tracker.xlsx",
+            "output/launch_course_deck.pptx",
+            "output/client_contract_template.docx",
+            "output/etsy_bundle_cover.png",
+            "output/life_os_notion.zip",
+            "output/budget_calculator.html",
+            "output/ai_prompts_pack.csv",
+            "output/2027_complete_customer_bundle.zip",
+        )
+        for (rel in expectedFiles) {
+            val f = sandbox.resolveFile(cid, rel)
+            assertTrue("Expected sellable deliverable missing: $rel", f.exists() && f.length() > 64)
+            val qa = sandbox.verifyArtifactProgrammatically(cid, rel)
+            assertTrue("QA failed for $rel: ${qa.report}", qa.passed && qa.score >= 90)
+        }
+    }
+
+    @Test
+    fun openAiClient_handlesNullContentAndExtractsReasoningOrFailsCleanly() = runTest {
+        // 1) content: null with reasoning JSON -> salvaged cleanly instead of literal "null"
+        val nullWithReasoning = JSONObject().put(
+            "choices",
+            org.json.JSONArray().put(
+                JSONObject().put(
+                    "message",
+                    JSONObject()
+                        .put("content", JSONObject.NULL)
+                        .put("reasoning", """Thinking... {"name":"FixedCo","bots":[]}""")
+                )
+            )
+        )
+        aiServer.enqueue(MockResponse().setResponseCode(200).setBody(nullWithReasoning.toString()))
+        val res1 = llm.complete(listOf("user" to "Propose a company"), jsonMode = true)
+        assertTrue("Should salvage JSON from reasoning when content is null", res1.ok)
+        assertTrue(res1.content.contains("FixedCo"))
+
+        // 2) content: null with NO reasoning -> must return ok=false (NEVER literal "null")
+        val pureNull = JSONObject().put(
+            "choices",
+            org.json.JSONArray().put(
+                JSONObject().put("message", JSONObject().put("content", JSONObject.NULL))
+            )
+        )
+        aiServer.enqueue(MockResponse().setResponseCode(200).setBody(pureNull.toString()))
+        val res2 = llm.complete(listOf("user" to "Hello"), jsonMode = false)
+        assertFalse("Pure null content must NOT succeed as literal 'null'", res2.ok)
+    }
 }

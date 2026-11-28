@@ -451,7 +451,13 @@ class OnDeviceLLMClient(context: Context) {
         var lastError = ""
         for ((prov, mod, key) in chain) {
             val res = callSingleProvider(prov, mod, key, messages, jsonMode, maxTokens)
-            if (res.ok && res.content.isNotBlank()) return res
+            if (res.ok && res.content.isNotBlank()) {
+                if (jsonMode && extractJsonObject(res.content) == null) {
+                    lastError = "${prov}/${mod}: non-JSON response"
+                    continue
+                }
+                return res
+            }
             lastError = "${prov}/${mod}: ${res.error}"
         }
         return LLMCallResult(ok = false, error = lastError, isOffline = false)
@@ -703,5 +709,81 @@ class OnDeviceLLMClient(context: Context) {
             }
         }
         return null
+    }
+
+    /**
+     * Parses BOTH standard JSON action objects AND XML-style tool calls emitted by Qwen3 / Hermes models
+     * (e.g. `<tool_call><function=browser_search><parameter=query>...</parameter></function></tool_call>`).
+     */
+    fun extractActionOrToolCall(raw: String): JSONObject? {
+        val xmlCalls = extractXmlToolCalls(raw)
+        if (xmlCalls != null) return xmlCalls
+        return extractJsonObject(raw)
+    }
+
+    fun extractXmlToolCalls(raw: String): JSONObject? {
+        if (!raw.contains("<tool_call", ignoreCase = true) && !raw.contains("<function=", ignoreCase = true)) {
+            return null
+        }
+        val calls = JSONArray()
+
+        // Format A: Qwen3 <function=tool_name><parameter=key>value</parameter></function>
+        val fnRegex = Regex(
+            """<function\s*=\s*([a-zA-Z0-9_.-]+)\s*>(.*?)</function>""",
+            setOf(RegexOption.DOT_MATCHES_ALL, RegexOption.IGNORE_CASE),
+        )
+        val paramRegex = Regex(
+            """<parameter\s*=\s*([a-zA-Z0-9_.-]+)\s*>(.*?)</parameter>""",
+            setOf(RegexOption.DOT_MATCHES_ALL, RegexOption.IGNORE_CASE),
+        )
+        for (m in fnRegex.findAll(raw)) {
+            val toolName = m.groupValues[1].trim()
+            if (toolName.isBlank()) continue
+            val body = m.groupValues[2]
+            val args = JSONObject()
+            for (pm in paramRegex.findAll(body)) {
+                val pKey = pm.groupValues[1].trim()
+                val pVal = pm.groupValues[2].trim()
+                if (pKey.isNotBlank()) {
+                    val parsedVal: Any = when {
+                        pVal.startsWith("{") && pVal.endsWith("}") -> runCatching { JSONObject(pVal) }.getOrDefault(pVal)
+                        pVal.startsWith("[") && pVal.endsWith("]") -> runCatching { JSONArray(pVal) }.getOrDefault(pVal)
+                        else -> pVal
+                    }
+                    args.put(pKey, parsedVal)
+                }
+            }
+            calls.put(JSONObject().put("tool", toolName).put("args", args))
+        }
+
+        // Format B: <tool_call>{"name":"...", "arguments":{...}}</tool_call>
+        if (calls.length() == 0) {
+            val tcRegex = Regex(
+                """<tool_call>(.*?)</tool_call>""",
+                setOf(RegexOption.DOT_MATCHES_ALL, RegexOption.IGNORE_CASE),
+            )
+            for (m in tcRegex.findAll(raw)) {
+                val obj = extractJsonObject(m.groupValues[1]) ?: continue
+                val tName = obj.optString("tool").ifBlank { obj.optString("name") }.trim()
+                if (tName.isBlank()) continue
+                val args = obj.optJSONObject("args") ?: obj.optJSONObject("arguments") ?: JSONObject()
+                calls.put(JSONObject().put("tool", tName).put("args", args))
+            }
+        }
+
+        if (calls.length() == 0) return null
+        return JSONObject().put("action", "tools").put("calls", calls)
+    }
+
+    /**
+     * Strips stray model markup (`<think>...</think>`, `<tool_call>...</tool_call>`) so raw internal tags
+     * never leak into user-facing chat bubbles.
+     */
+    fun sanitizeAssistantDisplayText(raw: String): String {
+        return raw
+            .replace(Regex("""<think>.*?</think>""", setOf(RegexOption.DOT_MATCHES_ALL, RegexOption.IGNORE_CASE)), "")
+            .replace(Regex("""<tool_call>.*?</tool_call>""", setOf(RegexOption.DOT_MATCHES_ALL, RegexOption.IGNORE_CASE)), "")
+            .replace(Regex("""<function\s*=[^>]+>.*?</function>""", setOf(RegexOption.DOT_MATCHES_ALL, RegexOption.IGNORE_CASE)), "")
+            .trim()
     }
 }

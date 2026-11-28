@@ -459,8 +459,16 @@ class AgyRuntimeManager(private val context: Context) {
                 modelsList.addAll(fetchModelsViaCli())
             }
 
-            if (selectedModel.isBlank() && modelsList.isNotEmpty()) {
-                selectedModel = modelsList.firstOrNull { it.id.contains("flash", true) }?.id ?: modelsList.first().id
+            val currentSelected = selectedModel
+            val currentStillValid = currentSelected.isNotBlank() && modelsList.any {
+                it.id.equals(currentSelected, ignoreCase = true) ||
+                    it.displayName.equals(currentSelected, ignoreCase = true) ||
+                    it.key.equals(currentSelected, ignoreCase = true)
+            }
+            if ((!currentStillValid || currentSelected.isBlank()) && modelsList.isNotEmpty()) {
+                selectedModel = modelsList.firstOrNull { it.id.contains("flash", true) }?.id
+                    ?: modelsList.firstOrNull { it.id.contains("high", true) }?.id
+                    ?: modelsList.first().id
             }
 
             val quotaGroups = mutableListOf<AgyQuotaGroup>()
@@ -534,111 +542,152 @@ class AgyRuntimeManager(private val context: Context) {
             sandboxDir.mkdirs()
             val home = installer.homeDir()
             val chosenModel = modelId.ifBlank { selectedModel }
-            val cmd = mutableListOf(
-                installer.agyBinary().absolutePath,
-                "-p",
-                prompt,
-                "--output-format",
-                "stream-json",
-                "--dangerously-skip-permissions",
-                "--add-dir",
-                sandboxDir.absolutePath,
-            )
-            if (chosenModel.isNotBlank() && chosenModel != "auto") {
-                cmd.add("--model")
-                cmd.add(chosenModel)
-            }
 
-            val pb = ProcessBuilder(cmd)
-            pb.directory(sandboxDir)
-            applyAgyEnv(pb.environment(), home, forHub = false)
-
-            val streamedResponse = StringBuilder()
-            val nonJsonFallback = StringBuilder()
-            var finalResultResponse = ""
-            var resultStatus = ""
-            var resultError = ""
-            try {
-                val proc = pb.start()
-                activeRunProcess = proc
-                val timedOut = java.util.concurrent.atomic.AtomicBoolean(false)
-                val watchdogJob = scope.launch {
-                    delay(timeoutMs)
-                    if (activeRunProcess === proc && proc.isAlive) {
-                        timedOut.set(true)
-                        addLog("Watchdog killed stalled agy process after ${timeoutMs / 1000}s")
-                        runCatching { proc.destroyForcibly() }
-                    }
+            suspend fun execAgyAttempt(attemptModel: String): Pair<Boolean, String> {
+                val cmd = mutableListOf(
+                    installer.agyBinary().absolutePath,
+                    "-p",
+                    prompt,
+                    "--output-format",
+                    "stream-json",
+                    "--dangerously-skip-permissions",
+                    "--add-dir",
+                    sandboxDir.absolutePath,
+                )
+                if (attemptModel.isNotBlank() && attemptModel != "auto") {
+                    cmd.add("--model")
+                    cmd.add(attemptModel)
                 }
-                val errBuffer = StringBuilder()
-                val errJob = scope.launch {
-                    runCatching {
-                        proc.errorStream.bufferedReader().forEachLine { errLine ->
-                            errBuffer.append(errLine).append('\n')
+
+                val pb = ProcessBuilder(cmd)
+                pb.directory(sandboxDir)
+                applyAgyEnv(pb.environment(), home, forHub = false)
+
+                val streamedResponse = StringBuilder()
+                val nonJsonFallback = StringBuilder()
+                var finalResultResponse = ""
+                var resultStatus = ""
+                var resultError = ""
+                return try {
+                    val proc = pb.start()
+                    activeRunProcess = proc
+                    val timedOut = java.util.concurrent.atomic.AtomicBoolean(false)
+                    val watchdogJob = scope.launch {
+                        delay(timeoutMs)
+                        if (activeRunProcess === proc && proc.isAlive) {
+                            timedOut.set(true)
+                            addLog("Watchdog killed stalled agy process after ${timeoutMs / 1000}s")
+                            runCatching { proc.destroyForcibly() }
                         }
                     }
-                }
-
-                onStatus("CEO thinking (${chosenModel.ifBlank { "agy" }})...")
-
-                proc.inputStream.bufferedReader().forEachLine { rawLine ->
-                    val line = rawLine.trim()
-                    if (line.isBlank()) return@forEachLine
-                    if (line.startsWith("warning:", ignoreCase = true)) {
-                        addLog(line)
-                        return@forEachLine
-                    }
-                    val trimmedLine = line
-                    if (trimmedLine.startsWith("{")) {
-                        val ev = parseStreamJsonLine(trimmedLine)
-                        when (ev.kind) {
-                            "thinking" -> {
-                                if (ev.text.isNotBlank()) scope.launch { onThinkingDelta(ev.text) }
-                                scope.launch { onStatus("Reasoning via agy (${chosenModel.ifBlank { "auto" }})...") }
-                            }
-                            "tool" -> scope.launch {
-                                onStatus("agy → ${ev.toolName}...")
-                                onThinkingDelta("\n[CLI Tool: ${ev.toolName}${if (ev.toolArgs.isNotBlank()) " ${ev.toolArgs}" else ""}]\n")
-                            }
-                            "text_delta" -> if (ev.text.isNotBlank()) {
-                                streamedResponse.append(ev.text)
-                                scope.launch { onThinkingDelta(ev.text) }
-                            }
-                            "result" -> {
-                                resultStatus = ev.resultStatus
-                                resultError = ev.resultError
-                                if (ev.finalResponse.isNotBlank()) finalResultResponse = ev.finalResponse
+                    val errBuffer = StringBuilder()
+                    val errJob = scope.launch {
+                        runCatching {
+                            proc.errorStream.bufferedReader().forEachLine { errLine ->
+                                errBuffer.append(errLine).append('\n')
                             }
                         }
-                    } else if (!trimmedLine.startsWith("{\"event\"")) {
-                        nonJsonFallback.append(trimmedLine).append('\n')
+                    }
+
+                    onStatus("CEO thinking (${attemptModel.ifBlank { "agy auto" }})...")
+
+                    proc.inputStream.bufferedReader().forEachLine { rawLine ->
+                        val line = rawLine.trim()
+                        if (line.isBlank()) return@forEachLine
+                        if (line.startsWith("warning:", ignoreCase = true)) {
+                            addLog(line)
+                            return@forEachLine
+                        }
+                        if (line.startsWith("{")) {
+                            val ev = parseStreamJsonLine(line)
+                            when (ev.kind) {
+                                "thinking" -> {
+                                    if (ev.text.isNotBlank()) scope.launch { onThinkingDelta(ev.text) }
+                                    scope.launch { onStatus("Reasoning via agy (${attemptModel.ifBlank { "auto" }})...") }
+                                }
+                                "tool" -> scope.launch {
+                                    onStatus("agy → ${ev.toolName}...")
+                                    onThinkingDelta("\n[CLI Tool: ${ev.toolName}${if (ev.toolArgs.isNotBlank()) " ${ev.toolArgs}" else ""}]\n")
+                                }
+                                "text_delta" -> if (ev.text.isNotBlank()) {
+                                    streamedResponse.append(ev.text)
+                                    scope.launch { onThinkingDelta(ev.text) }
+                                }
+                                "result" -> {
+                                    resultStatus = ev.resultStatus
+                                    resultError = ev.resultError
+                                    if (ev.finalResponse.isNotBlank()) finalResultResponse = ev.finalResponse
+                                }
+                            }
+                        } else if (!line.startsWith("{\"event\"")) {
+                            nonJsonFallback.append(line).append('\n')
+                        }
+                    }
+
+                    val code = proc.waitFor()
+                    watchdogJob.cancel()
+                    runCatching { errJob.join() }
+                    activeRunProcess = null
+
+                    val answer = finalResultResponse
+                        .ifBlank { streamedResponse.toString() }
+                        .ifBlank { nonJsonFallback.toString() }
+                        .trim()
+                    val errText = errBuffer.toString().trim()
+
+                    if (timedOut.get()) {
+                        false to "agy timed out after ${timeoutMs / 1000}s"
+                    } else if (resultStatus.equals("ERROR", ignoreCase = true)) {
+                        false to resultError.ifBlank { answer }.ifBlank { errText }.ifBlank { "Antigravity CLI error" }
+                    } else if (answer.isNotBlank()) {
+                        true to answer
+                    } else {
+                        false to (errText.ifBlank { "agy exited with code $code (empty output)" })
+                    }
+                } catch (e: Exception) {
+                    activeRunProcess = null
+                    false to (e.message ?: "agy execution failed")
+                }
+            }
+
+            val first = execAgyAttempt(chosenModel)
+            if (first.first) return@withContext first
+
+            // Auto-recover if saved model was retired/renamed or hit quota/capacity!
+            val errLower = first.second.lowercase()
+            val isStaleOrQuotaModel = chosenModel.isNotBlank() && chosenModel != "auto" && (
+                "invalid model" in errLower ||
+                    "not recognized as a known model" in errLower ||
+                    "unknown model" in errLower ||
+                    "model not found" in errLower ||
+                    "quota" in errLower ||
+                    "exhausted" in errLower ||
+                    "capacity" in errLower
+                )
+            if (isStaleOrQuotaModel) {
+                val liveModels = fetchModelsViaCli()
+                val replacement = liveModels.firstOrNull {
+                    !it.id.equals(chosenModel, true) && it.id.contains("flash", true)
+                }?.id ?: liveModels.firstOrNull { !it.id.equals(chosenModel, true) }?.id ?: ""
+                onStatus("Model '$chosenModel' unavailable — switching to ${replacement.ifBlank { "default agy model" }}...")
+                addLog("Auto-switched stale/unavailable agy model '$chosenModel' -> '${replacement.ifBlank { "default" }}'")
+                val retry = execAgyAttempt(replacement)
+                if (retry.first) {
+                    selectedModel = replacement
+                    emitTick()
+                    return@withContext retry
+                }
+                if (replacement.isNotBlank()) {
+                    // Final fallback: let agy pick its own built-in default without --model
+                    val defaultRetry = execAgyAttempt("")
+                    if (defaultRetry.first) {
+                        selectedModel = ""
+                        emitTick()
+                        return@withContext defaultRetry
                     }
                 }
-
-                val code = proc.waitFor()
-                watchdogJob.cancel()
-                runCatching { errJob.join() }
-                activeRunProcess = null
-
-                val answer = finalResultResponse
-                    .ifBlank { streamedResponse.toString() }
-                    .ifBlank { nonJsonFallback.toString() }
-                    .trim()
-                val errText = errBuffer.toString().trim()
-
-                if (timedOut.get()) {
-                    false to "agy timed out after ${timeoutMs / 1000}s"
-                } else if (resultStatus.equals("ERROR", ignoreCase = true)) {
-                    false to resultError.ifBlank { answer }.ifBlank { errText }.ifBlank { "Antigravity CLI error" }
-                } else if (answer.isNotBlank()) {
-                    true to answer
-                } else {
-                    false to (errText.ifBlank { "agy exited with code $code (empty output)" })
-                }
-            } catch (e: Exception) {
-                activeRunProcess = null
-                false to (e.message ?: "agy execution failed")
             }
+            first
         }
     }
 

@@ -29,6 +29,10 @@
 - [x] **Backend Python (`backend/`)** : 5/5 tests `pytest` verts.
 - [x] **FreeLLMAPI (`freellmapi`) + Pool Modèles Gratuits (`v0.7.0`)** :
   - Fournisseur natif `freellmapi` avec URL de passerelle configurable (défaut `http://127.0.0.1:3001`), jeton Bearer optionnel en local, filtre automatique sur `available == true`, badge `FREE`, épingle `auto` / `fusion` et activation automatique du routeur gratuit.
+- [x] **Audit Live ADB & Fiabilisation Production (`v0.10.1`)** :
+  - `AgyRuntimeManager.kt` : auto-migration automatique des modèles `agy` obsolètes/renommés (ex. `gemini-4-neon-high` → modèle live valide) dans `fetchModelsAndQuotas` et `runPrompt` avec retry transparent.
+  - `OnDeviceLLMClient.kt` + `AutonomousEngine.kt` : parseur complet des appels d'outils XML Qwen3/Hermes (`<tool_call><function=...>`) convertis en exécution réelle + nettoyage `<think>`/`<tool_call>` avant affichage, rejet des échos de schéma vide dans `proposeCompany`, et avertissement explicite sur la carte d'approbation si le score QA `< 60/100`.
+  - `Sheets.kt` + `MainApp.kt` : spinner haute visibilité et statut live dans la boîte *Found a new company*.
 - [x] **Usine Multi-Formats de Produits Numériques Vendables & Fix OpenRouter `null` (`v0.10.0`)** :
   - `DigitalProductFactory.kt` + `DigitalProductSkills.kt` : compétences natives 100 % on-device pour tous les formats commerciaux porteurs du marché (Gumroad, Etsy, Notion, LemonSqueezy, Creative Market, Whop) — `.xlsx` (Excel/Google Sheets avec formules), `.pptx` (PowerPoint/Slides 16:9), `.docx` (Word/Google Docs), `.png` (couvertures & mockups haute résolution), packs Notion importables (`.md` + `.csv`), `.html` (micro-apps & calculateurs interactifs), `.csv` UTF-8 BOM, `.pdf` livres illustrés, `.svg` vectoriels et `.zip` clients avec `00_START_HERE.txt`.
   - `OnDeviceSandbox.verifyArtifactProgrammatically` : audit QA natif de tous les formats (`.xlsx`, `.pptx`, `.docx`, `.png`, `.csv`, `.html`, `.pdf`, `.svg`, `.zip`).

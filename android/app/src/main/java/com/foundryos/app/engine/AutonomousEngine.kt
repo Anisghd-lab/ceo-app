@@ -530,7 +530,10 @@ class AutonomousEngine(
         )
 
         val parsed = if (resp.ok) llm.extractJsonObject(resp.content) else null
-        if (parsed != null && parsed.optJSONArray("bots")?.length() ?: 0 >= 2) {
+        val parsedName = parsed?.optString("name").orEmpty().trim()
+        val isTemplateEcho = parsedName.equals("Short crisp company name", ignoreCase = true) ||
+            parsed?.optString("mission_statement").orEmpty().trim().equals("1-sentence mission", ignoreCase = true)
+        if (parsed != null && !isTemplateEcho && parsed.optJSONArray("bots")?.length() ?: 0 >= 2) {
             finishReasoning("Designed ${parsed.optString("name", "company")} team")
             return normalizeProposal(parsed, description)
         }
@@ -998,7 +1001,7 @@ class AutonomousEngine(
         rawReply: String,
         explicitChoices: List<ChoiceOption>? = null,
     ) {
-        var finalText = rawReply.trim()
+        var finalText = llm.sanitizeAssistantDisplayText(rawReply).ifBlank { rawReply.trim() }
         var options = explicitChoices
 
         if (options.isNullOrEmpty()) {
@@ -1160,7 +1163,7 @@ class AutonomousEngine(
                 return
             }
             db.addTokensUsed(comp.id, res.tokensUsed)
-            val obj = llm.extractJsonObject(res.content)
+            val obj = llm.extractActionOrToolCall(res.content)
             val act = obj?.optString("action")?.lowercase().orEmpty()
             when {
                 act == "run_mission" -> {
@@ -1324,7 +1327,7 @@ class AutonomousEngine(
             // Pick up any native output/ files created directly on disk via Antigravity CLI I/O
             harvestNativeCliArtifacts(comp.id, bot.name, seenOutNames).forEach { emitArtifactCard(comp, bot.name, it) }
 
-            val obj = llm.extractJsonObject(res.content)
+            val obj = llm.extractActionOrToolCall(res.content)
             val act = obj?.optString("action")?.lowercase().orEmpty()
             if ((act == "tool" || act == "tools" || (obj != null && obj.has("calls"))) && obj != null) {
                 val (obs, createdArts) = executeToolOrBatch(comp, bot, obj, onStatusUpdate)
@@ -1836,8 +1839,9 @@ class AutonomousEngine(
                 companyId = comp.id,
                 missionId = missionId,
                 artifactId = primaryArt?.id,
-                title = "Ship ${primaryArt?.title ?: title}?",
-                subtitle = "QA $qaScore/100 by ${qaBot.name} · Verified in on-device sandbox",
+                title = if (qaPassed && qaScore >= 60) "Ship ${primaryArt?.title ?: title}?"
+                else "⚠️ Review (QA $qaScore/100): ${primaryArt?.title ?: title}",
+                subtitle = "QA $qaScore/100 by ${qaBot.name} · ${if (qaPassed) "Verified in on-device sandbox" else qaReport.take(90)}",
                 actionType = "SHIP_RELEASE",
                 actionPayloadJson = aprPayload.toString(),
                 status = "PENDING",
@@ -1938,7 +1942,7 @@ class AutonomousEngine(
             // Pick up any native output/ files written directly by Antigravity CLI I/O
             created.addAll(harvestNativeCliArtifacts(comp.id, bot.name, seenOutNames))
 
-            val parsed = llm.extractJsonObject(res.content) ?: break
+            val parsed = llm.extractActionOrToolCall(res.content) ?: break
             val action = parsed.optString("action").lowercase()
             val toolName = parsed.optString("tool")
             when {

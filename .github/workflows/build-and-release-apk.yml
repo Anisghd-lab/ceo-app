@@ -7,9 +7,9 @@ on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: 'Release tag (e.g. v0.10.0)'
+        description: 'Release tag (e.g. v0.10.1)'
         required: false
-        default: 'v0.10.0'
+        default: 'v0.10.1'
 
 permissions:
   contents: write
@@ -87,7 +87,7 @@ jobs:
             if [[ "${{ github.ref }}" == refs/tags/* ]]; then
               TAG="${{ github.ref_name }}"
             else
-              TAG="v0.10.0"
+              TAG="v0.10.1"
             fi
           fi
 
@@ -98,7 +98,7 @@ jobs:
           UNIQUE_APK="/tmp/${ASSET_NAME}"
           cp "$APK_PATH" "$UNIQUE_APK"
 
-          NOTES="$(printf '### CEO — 100%% On-Device Autonomous Company OS (%s)\n\n- **Usine Multi-Formats de Produits Numériques Vendables (`DigitalProductFactory` + `DigitalProductSkills`)** : les agents ne se limitent plus aux PDFs — génération 100%% locale de vrais fichiers commerciaux : **Excel / Google Sheets (`.xlsx` avec formules `=SUM`, `=B2-C2`)**, **PowerPoint / Google Slides / Canva (`.pptx` 16:9)**, **Word / Google Docs (`.docx`)**, **Visuels & Couvertures PNG haute résolution (`.png`)**, **Packs Notion importables (`.md` + `.csv` DBs)**, **Micro-Apps & Calculateurs HTML5 interactifs (`.html`)**, **Datasets CSV UTF-8 BOM (`.csv`)**, **Livres & Workbooks PDF illustrés (`PdfBookRenderer`)**, **SVG vectoriels** et **Bundles clients `.zip` avec guide `00_START_HERE.txt`**\n- **Correction critique OpenRouter (`Réponse IA non structurée: null`)** : gestion correcte des champs `content: null` et `reasoning` / `reasoning_content` des modèles gratuits OpenRouter (`openrouter/free`), suppression de `response_format: json_object` sur les modèles gratuits incompatibles et retry/fallback propre\n- **Moteur PDF Éditorial Illustré + Timeout Producteur 4 min (`240s`)** : couverture pleine page, sommaire, cases à cocher imprimables, tableaux, graphiques vectoriels et synthèse IA directe en cas de délai dépassé\n- **Choix interactifs en 1 clic (façon ChatGPT)** + **Réponses concises** + **Copier / Modifier / Régénérer**\n- **Taille APK** : `%s`\n- **SHA-256** : `%s`\n- **Compilé sur** : GitHub Actions (`ubuntu-latest`)\n' "$TAG" "$SIZE" "$SHA256")"
+          NOTES="$(printf '### CEO — 100%% On-Device Autonomous Company OS (%s)\n\n- **Auto-récupération modèle Antigravity CLI (`agy`)** : si le modèle sauvegardé est obsolète/renommé (ex. `gemini-4-neon-high`) ou épuisé en quota, l'\''app détecte automatiquement les modèles live (`agy models`), bascule sur un modèle valide et le mémorise sans jamais tomber silencieusement sur un mini-modèle de secours\n- **Parseur natif des appels d'\''outils XML Qwen3/Hermes (`<tool_call><function=...>`)** : exécute réellement les outils au lieu d'\''afficher du XML brut dans le chat et filtre `<think>` / `<tool_call>`\n- **Validation stricte des propositions d'\''entreprise & QA Gate honnête** : rejette les échos de schéma vide, affiche le statut en direct + spinner haute visibilité dans *Found a new company*, et signale explicitement les livrables `< 60/100` en QA\n- **Usine Multi-Formats de Produits Numériques Vendables** : `.xlsx` (formules), `.pptx` (16:9), `.docx`, `.png` HD, packs Notion, `.html` interactifs, `.csv`, `.svg`, `.pdf` illustrés et bundles `.zip`\n- **Taille APK** : `%s`\n- **SHA-256** : `%s`\n- **Compilé sur** : GitHub Actions (`ubuntu-latest`)\n' "$TAG" "$SIZE" "$SHA256")"
 
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" "$UNIQUE_APK" --clobber

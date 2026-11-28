@@ -95,6 +95,7 @@ import com.foundryos.app.ui.theme.FoundryColors
 @Composable
 fun CreateCompanyDialog(
     isLoading: Boolean,
+    liveStatus: String = "",
     proposal: CompanyProposalData?,
     onPropose: (String) -> Unit,
     onDeploy: (String, CompanyProposalData) -> Unit,
@@ -156,13 +157,23 @@ fun CreateCompanyDialog(
                     onClick = { if (description.trim().length >= 5) onPropose(description.trim()) },
                     enabled = !isLoading && description.trim().length >= 5,
                     shape = RoundedCornerShape(999.dp),
-                    colors = ButtonDefaults.buttonColors(containerColor = FoundryColors.InkPrimary),
-                    modifier = Modifier.fillMaxWidth().height(46.dp),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = FoundryColors.InkPrimary,
+                        contentColor = Color.White,
+                        disabledContainerColor = if (isLoading) FoundryColors.InkPrimary.copy(alpha = 0.86f) else FoundryColors.SoftSurface,
+                        disabledContentColor = if (isLoading) Color.White else FoundryColors.InkMuted,
+                    ),
+                    modifier = Modifier.fillMaxWidth().height(48.dp),
                 ) {
                     if (isLoading) {
                         CircularProgressIndicator(color = Color.White, strokeWidth = 2.dp, modifier = Modifier.size(18.dp))
                         Spacer(Modifier.width(8.dp))
-                        Text("CEO is designing your team...")
+                        Text(
+                            text = liveStatus.ifBlank { "CEO is designing your team..." },
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            fontWeight = FontWeight.Medium,
+                        )
                     } else {
                         Text("Ask CEO to design team", fontWeight = FontWeight.SemiBold)
                     }

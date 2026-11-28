@@ -1525,6 +1525,7 @@ fun FoundryMainScreen(repo: FoundryRepository) {
     if (showCreateDialog) {
         CreateCompanyDialog(
             isLoading = isBusy,
+            liveStatus = liveReasoning.statusLine,
             proposal = proposal,
             onPropose = { desc ->
                 scope.launch {

@@ -1122,4 +1122,38 @@ class AutonomousBotsEndToEndTest {
         val res2 = llm.complete(listOf("user" to "Hello"), jsonMode = false)
         assertFalse("Pure null content must NOT succeed as literal 'null'", res2.ok)
     }
+
+    @Test
+    fun xmlToolCallParser_executesQwenXmlToolCallsAndSanitizesDisplayText() {
+        val qwenRaw = """
+            <think>Searching for PDF tools first</think>
+            <tool_call>
+            <function=browser_search>
+            <parameter=query>
+            PDF verification tools
+            </parameter>
+            </function>
+            </tool_call>
+            <tool_call>
+            <function=create_csv_dataset>
+            <parameter=filename>keywords.csv</parameter>
+            <parameter=headers>["Keyword","Volume"]</parameter>
+            </function>
+            </tool_call>
+        """.trimIndent()
+
+        val parsed = llm.extractActionOrToolCall(qwenRaw)
+        assertNotNull("Qwen3 XML tool calls must parse into tool batch", parsed)
+        assertEquals("tools", parsed!!.optString("action"))
+        val calls = parsed.optJSONArray("calls")
+        assertNotNull(calls)
+        assertEquals(2, calls!!.length())
+        assertEquals("browser_search", calls.getJSONObject(0).optString("tool"))
+        assertEquals("PDF verification tools", calls.getJSONObject(0).optJSONObject("args")?.optString("query"))
+        assertEquals("create_csv_dataset", calls.getJSONObject(1).optString("tool"))
+        assertEquals("keywords.csv", calls.getJSONObject(1).optJSONObject("args")?.optString("filename"))
+
+        val cleaned = llm.sanitizeAssistantDisplayText("<think>internal</think>Réponse nette pour le Fondateur.<tool_call><function=x></function></tool_call>")
+        assertEquals("Réponse nette pour le Fondateur.", cleaned)
+    }
 }

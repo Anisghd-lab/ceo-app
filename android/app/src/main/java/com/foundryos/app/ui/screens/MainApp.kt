@@ -592,7 +592,7 @@ fun FoundryMainScreen(repo: FoundryRepository) {
                                 .clip(CircleShape)
                                 .clickable {
                                     repo.clearBotUnread(bot.id)
-                                    selectedBot = bot
+                                    // Inspect bot telemetry without hijacking CEO autonomous orchestration
                                     inspectBot = bot
                                     refreshAll(activeCompanyId)
                                 }
@@ -877,7 +877,6 @@ fun FoundryMainScreen(repo: FoundryRepository) {
                             canRegenerate = canRegenerate,
                             onBotClick = { bot ->
                                 val chosen = bots.firstOrNull { it.id == bot.id } ?: bot
-                                selectedBot = chosen
                                 inspectBot = chosen
                             },
                             onApprove = { aprId ->
@@ -902,9 +901,10 @@ fun FoundryMainScreen(repo: FoundryRepository) {
                                 if (!isBusy) {
                                     haptics.performHapticFeedback(HapticFeedbackType.LongPress)
                                     repo.markMessageChoiceSelected(msg.id, option.id)
+                                    selectedBot = bots.firstOrNull { it.isCeo } ?: selectedBot
                                     refreshAll(activeCompany.id)
-                                    val targetId = if (headerBot?.isCeo == true) null else headerBot?.id
-                                    launchExecution(activeCompany.id, option.value, emptyList(), targetId)
+                                    // Interactive choices ALWAYS go to CEO so the full team chains autonomously!
+                                    launchExecution(activeCompany.id, option.value, emptyList(), null)
                                 }
                             },
                             onCopy = { copyMessageToClipboard(msg) },
@@ -1393,7 +1393,6 @@ fun FoundryMainScreen(repo: FoundryRepository) {
                                         .background(if (selectedBot?.id == bot.id) Color.White else Color.Transparent)
                                         .clickable {
                                             repo.clearBotUnread(bot.id)
-                                            selectedBot = bot
                                             inspectBot = bot
                                             sidebarExpanded = false
                                             refreshAll(activeCompanyId)
@@ -1810,7 +1809,6 @@ fun FoundryMainScreen(repo: FoundryRepository) {
             telemetryMap = botTelemetry,
             onSelectBot = { nextBot ->
                 inspectBot = nextBot
-                selectedBot = nextBot
             },
             onOpenUrl = { url ->
                 browserUrl = url

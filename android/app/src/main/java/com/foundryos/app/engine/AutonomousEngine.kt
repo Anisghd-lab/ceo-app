@@ -1021,9 +1021,10 @@ class AutonomousEngine(
 
         if (!options.isNullOrEmpty()) {
             val choiceData = ChoicePromptData(options = options)
+            val msgId = "msg_${UUID.randomUUID().toString().take(10)}"
             db.insertMessage(
                 ChatMessageItem(
-                    id = "msg_${UUID.randomUUID().toString().take(10)}",
+                    id = msgId,
                     companyId = companyId,
                     senderType = "bot",
                     botId = botId,
@@ -1033,6 +1034,16 @@ class AutonomousEngine(
                     choices = choiceData,
                 ),
                 rawPayloadJson = ChoiceExtractor.toPayloadJson(choiceData),
+            )
+            // Send actionable Android notification so the Founder can pick/reply directly from notifications
+            val compName = db.getCompany(companyId)?.name ?: "CEO"
+            ApprovalNotifier.showChoiceNotification(
+                context = context,
+                companyId = companyId,
+                companyName = compName,
+                messageId = msgId,
+                question = finalText,
+                choices = choiceData,
             )
         } else {
             db.insertMessage(
@@ -1120,9 +1131,10 @@ class AutonomousEngine(
               Supported sandbox tools: list_files, read_file, write_file, create_pdf, create_xlsx, create_pptx, create_docx, create_png_graphic, create_svg_graphic, create_web_app, create_notion_pack, create_csv_dataset, create_zip, product_design_prototype, assign_bot_prompt.
               ${DigitalProductSkills.marketCapabilitiesPrompt()}
               Or ANY connected plugin tool above (browser_search, browser_read_url, notion_search, github_list_repos, slack_list_channels, gmail_search, gdrive_search, figma_get_file, canva_list_designs, scite_search, tinyfish_extract, etc.).
-            - ONLY if the Founder wants a full multi-bot pipeline producing deliverables with QA + Approval, output:
+            - ULTIMATE AUTONOMY RULE (CRITICAL): Whenever the Founder approves a direction, picks a choice, or asks to create/launch/build/research/deliver a product or project, IMMEDIATELY launch the full autonomous multi-bot pipeline with `{"action":"run_mission",...}` so ALL specialist bots chain automatically from start to finish (Research → ALL Producers & Designers → QA → Launch/Bundle → Memory) with ZERO manual handoffs and ZERO stopping between bots! NEVER stop after one bot and wait for the Founder to prompt the next bot. Only pause to ask the Founder using `{"action":"choices",...}` when a genuine strategic choice is needed BEFORE launching.
+            - To launch the full autonomous multi-bot pipeline (Research → Production → Visuals → QA → Launch → Memory → Final Ship), output:
               {"action":"run_mission","title":"Short mission title","goal":"Detailed mission goal","ceo_reply":"Brief 1-2 sentence CEO plan","bot_mandates":{"Strategist":"Tailored mission directive aligned with role & objective","Builder":"Tailored mission directive"}}
-            - When ready to reply directly (without choices), respond with brief, concise prose/markdown (or {"action":"final","reply":"..."}).
+            - When ready to reply directly (without choices or a mission), respond with brief, concise prose/markdown (or {"action":"final","reply":"..."}).
         """.trimIndent()
 
         val history = mutableListOf<String>()
@@ -1407,15 +1419,16 @@ class AutonomousEngine(
             .ifEmpty { candidates.filter { it.allowedTools.contains("web_fetch") || it.allowedTools.contains("browser_search") }.take(1) }
         val researchIds = researchBots.map { it.id }.toSet()
 
-        val producerBot = candidates.firstOrNull {
-            it.id !in researchIds && !isMarketingOrSocialRole(it) && !isVisualRole(it) &&
-                (it.allowedTools.contains("create_pdf") || !isResearchRole(it))
-        } ?: candidates.firstOrNull { it.id !in researchIds && !isMarketingOrSocialRole(it) }
-            ?: candidates.firstOrNull { it.id !in researchIds }
-            ?: ceoBot
+        val producerBots = candidates.filter {
+            it.id !in researchIds && !isMarketingOrSocialRole(it) && !isVisualRole(it)
+        }.ifEmpty {
+            listOfNotNull(candidates.firstOrNull { it.id !in researchIds } ?: ceoBot)
+        }
+        val producerBot = producerBots.first()
+        val producerIds = producerBots.map { it.id }.toSet()
 
-        val visualDesignBots = candidates.filter { it.id !in researchIds && it.id != producerBot.id && isVisualRole(it) && !isMarketingOrSocialRole(it) }
-        val stage1And2Ids = researchIds + visualDesignBots.map { it.id } + producerBot.id
+        val visualDesignBots = candidates.filter { it.id !in researchIds && it.id !in producerIds && isVisualRole(it) && !isMarketingOrSocialRole(it) }
+        val stage1And2Ids = researchIds + producerIds + visualDesignBots.map { it.id }
         val postQaSpecialists = candidates.filter { it.id !in stage1And2Ids }
 
         val missionId = resumeCheckpoint?.missionId?.ifBlank { null } ?: "msn_${UUID.randomUUID().toString().take(8)}"
@@ -1563,47 +1576,51 @@ class AutonomousEngine(
             }
             if (runCancelled || killSwitch) return
 
-            // Stage 2a: Primary Producer Bot builds core deliverable(s)
-            var createdArtifacts = db.listArtifacts(comp.id).filter { it.botName == producerBot.name }.toMutableList()
-            val seenOutBeforeProducer = sandbox.listOutputFiles(comp.id).map { it.name }.toMutableSet()
-            val producerWasInterrupted = producerBot.id == interruptedTargetId
+            // Stage 2a: ALL Primary Producer Bots chain autonomously back-to-back (e.g. SheetCraft -> FormatForge) with zero pauses
+            var createdArtifacts = db.listArtifacts(comp.id).filter { it.botName in producerBots.map { b -> b.name }.toSet() }.toMutableList()
             val producerTimeout = if (botStepTimeoutMs >= 10_000L) maxOf(botStepTimeoutMs, 240_000L) else botStepTimeoutMs
-            val (prodOk, prodBuilt) = runGuardedBotStep(
-                bot = producerBot,
-                stepLabel = "Production ($title)",
-                customTimeoutMs = producerTimeout,
-            ) {
-                onStatusUpdate("${producerBot.name} is authoring complete deliverables in sandbox...")
-                recordBotActivity(producerBot, "working", task = "Building deliverables: $title")
-                db.updateBotStatus(producerBot.id, "working", "Authoring book & deliverables...")
-                runProducerAgentLoop(comp, producerBot, missionId, title, goal, scopedSpec, onStatusUpdate)
-            }
-            if (!prodOk) return
-            val diskAfterProducer = run {
-                prodBuilt?.forEach { seenOutBeforeProducer.add(it.filename) }
-                harvestNativeCliArtifacts(comp.id, producerBot.name, seenOutBeforeProducer)
-            }
-            if (prodBuilt != null || diskAfterProducer.isNotEmpty()) {
-                val merged = ((prodBuilt ?: emptyList()) + diskAfterProducer).distinctBy { it.relPath }
-                if (merged.isNotEmpty()) {
-                    createdArtifacts = merged.toMutableList()
+            var anyProducerInterruptedByFounder = false
+            for (pBot in producerBots) {
+                if (runCancelled || killSwitch) return
+                val seenOutBeforeP = sandbox.listOutputFiles(comp.id).map { it.name }.toMutableSet()
+                val pWasInterrupted = pBot.id == interruptedTargetId
+                if (pWasInterrupted) anyProducerInterruptedByFounder = true
+                val (prodOk, prodBuilt) = runGuardedBotStep(
+                    bot = pBot,
+                    stepLabel = "Production (${pBot.name})",
+                    customTimeoutMs = producerTimeout,
+                ) {
+                    onStatusUpdate("${pBot.name} (${pBot.role}) authoring deliverables autonomously...")
+                    recordBotActivity(pBot, "working", task = "Building deliverables: $title")
+                    db.updateBotStatus(pBot.id, "working", "Building deliverables...")
+                    runProducerAgentLoop(comp, pBot, missionId, title, goal, scopedSpec, onStatusUpdate)
                 }
-                recordBotActivity(producerBot, "idle", task = "Built ${createdArtifacts.size} artifact(s)")
-                db.updateBotStatus(producerBot.id, "idle", "Deliverable ready", incrementUnread = true)
-                appendTeamFeed(comp.id, producerBot.name, "Built ${createdArtifacts.joinToString(", ") { it.filename }}")
-                db.insertMessage(
-                    ChatMessageItem(
-                        "msg_${UUID.randomUUID().toString().take(10)}",
-                        comp.id,
-                        "bot",
-                        botId = producerBot.id,
-                        botName = producerBot.name,
-                        content = "🛠️ [${producerBot.name} → CEO] Production terminée : ${createdArtifacts.joinToString(", ") { it.filename }}",
+                if (!prodOk) return
+                val diskAfterP = run {
+                    prodBuilt?.forEach { seenOutBeforeP.add(it.filename) }
+                    harvestNativeCliArtifacts(comp.id, pBot.name, seenOutBeforeP)
+                }
+                val stepArts = ((prodBuilt ?: emptyList()) + diskAfterP).distinctBy { it.relPath }
+                if (stepArts.isNotEmpty()) {
+                    createdArtifacts = (createdArtifacts + stepArts).distinctBy { it.relPath }.toMutableList()
+                    recordBotActivity(pBot, "idle", task = "Built ${stepArts.size} artifact(s)")
+                    db.updateBotStatus(pBot.id, "idle", "Deliverable ready", incrementUnread = true)
+                    appendTeamFeed(comp.id, pBot.name, "Built ${stepArts.joinToString(", ") { it.filename }}")
+                    db.insertMessage(
+                        ChatMessageItem(
+                            "msg_${UUID.randomUUID().toString().take(10)}",
+                            comp.id,
+                            "bot",
+                            botId = pBot.id,
+                            botName = pBot.name,
+                            content = "🛠️ [${pBot.name} → CEO] Production terminée : ${stepArts.joinToString(", ") { it.filename }}",
+                        )
                     )
-                )
-            } else if (createdArtifacts.isEmpty()) {
+                }
+            }
+            if (createdArtifacts.isEmpty()) {
                 // If Producer timed out (not explicitly skipped by Founder) and an AI engine is active, run a direct 1-shot illustrated book authoring pass
-                val aiRecovered = if (!producerWasInterrupted && hasActiveEngine() && !runCancelled && !killSwitch) {
+                val aiRecovered = if (!anyProducerInterruptedByFounder && hasActiveEngine() && !runCancelled && !killSwitch) {
                     val recTimeout = if (botStepTimeoutMs >= 10_000L) maxOf(botStepTimeoutMs, 120_000L) else botStepTimeoutMs
                     withWallTimeoutOrNull(recTimeout) {
                         synthesizeAiBookPdf(comp, producerBot, title, goal, scopedSpec, onStatusUpdate)
@@ -2183,6 +2200,10 @@ class AutonomousEngine(
             tool.startsWith("kittl_") -> "https://www.kittl.com/projects"
             tool.startsWith("scite_") -> "https://scite.ai"
             tool.startsWith("tinyfish_") -> args.optString("url").ifBlank { "https://app.tinyfish.io" }
+            tool.startsWith("openhands_") -> {
+                val cid = args.optString("conversation_id")
+                if (cid.isNotBlank()) "https://app.all-hands.dev/conversations/$cid" else "https://app.all-hands.dev"
+            }
             else -> ""
         }
     }

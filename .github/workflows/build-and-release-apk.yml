@@ -7,9 +7,9 @@ on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: 'Release tag (e.g. v0.10.2)'
+        description: 'Release tag (e.g. v0.11.0)'
         required: false
-        default: 'v0.10.2'
+        default: 'v0.11.0'
 
 permissions:
   contents: write
@@ -87,7 +87,7 @@ jobs:
             if [[ "${{ github.ref }}" == refs/tags/* ]]; then
               TAG="${{ github.ref_name }}"
             else
-              TAG="v0.10.2"
+              TAG="v0.11.0"
             fi
           fi
 
@@ -98,7 +98,7 @@ jobs:
           UNIQUE_APK="/tmp/${ASSET_NAME}"
           cp "$APK_PATH" "$UNIQUE_APK"
 
-          NOTES="$(printf '### CEO — 100%% On-Device Autonomous Company OS (%s)\n\n- **Rendu Markdown natif riche dans le chat (`MarkdownChatText`)** : fini les `###`, `**`, `*`, backticks et chemins `file:///` bruts — affichage natif propre des **titres**, **gras**, *italique*, `badges de code`, listes à puces/numérotées, cases à cocher, citations, tableaux et **liens fichiers cliquables** ouvrant directement les livrables de la sandbox\n- **Carte `CompanyOrgCard` compactée** : les APIs suggérées n'\''étirent plus excessivement la boîte de création\n- **Auto-migration `agy` + Parseur XML Qwen3 + Usine Multi-Formats (`.xlsx`, `.pptx`, `.docx`, `.png`, Notion, `.html`, `.csv`, `.pdf` illustrés, `.zip`)**\n- **Taille APK** : `%s`\n- **SHA-256** : `%s`\n- **Compilé sur** : GitHub Actions (`ubuntu-latest`)\n' "$TAG" "$SIZE" "$SHA256")"
+          NOTES="$(printf '### CEO — 100%% On-Device Autonomous Company OS (%s)\n\n- **Autonomie Ultime Multi-Agents sans pause entre bots** : tous les bots spécialistes (Recherche → **tous les Producteurs** ex. `SheetCraft` + `FormatForge` → Visuels `PixelVault` → QA `VeritasQA` → Launch `PackLaunch` → Mémoire `OmniMemory`) s'\''enchaînent désormais automatiquement de bout en bout sans jamais attendre un message manuel entre deux bots. Cliquer un bot dans la barre latérale ouvre son inspecteur sans détourner le chat du CEO !\n- **Réponse directe aux choix interactifs du CEO depuis les Notifications Android** : chaque question à choix du CEO envoie une notification actionnable avec boutons directs en 1 clic (`1. ...`, `2. ...`, `3. ...`) + bouton **Répondre** (`RemoteInput`) qui lance immédiatement le CEO et toute l'\''équipe en arrière-plan\n- **Rendu Markdown natif riche (`MarkdownChatText`)** : gras, italique, titres propres (zéro `#`/`**`/`*`/backticks bruts), listes, citations, tableaux et **liens fichiers cliquables** ouvrant directement les livrables de la sandbox\n- **Plugin #15 OpenHands Cloud (`app.all-hands.dev`)** : intégration optionnelle de l'\''agent d'\''ingénierie logicielle cloud OpenHands (`openhands_list_conversations`, `openhands_get_status`, `openhands_start_task` avec approbation humaine) pour exécuter des tâches multi-fichiers/Docker/PR GitHub tout en gardant CEO 100%% autonome sur Android\n- **Taille APK** : `%s`\n- **SHA-256** : `%s`\n- **Compilé sur** : GitHub Actions (`ubuntu-latest`)\n' "$TAG" "$SIZE" "$SHA256")"
 
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" "$UNIQUE_APK" --clobber

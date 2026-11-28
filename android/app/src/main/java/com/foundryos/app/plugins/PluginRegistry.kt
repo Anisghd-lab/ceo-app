@@ -242,6 +242,22 @@ object PluginRegistry {
                 PluginToolDef("tiktok_publish_video", "Stage/publish a marketing video to TikTok (requires Human Yes)", true, "{\"video_url\":\"...\",\"title\":\"...\"}"),
             ),
         ),
+        PluginDefinition(
+            id = "openhands",
+            name = "OpenHands Cloud",
+            category = "Cloud Software Engineer",
+            tagline = "Delegate full-repo coding, Docker test runs & GitHub PRs to OpenHands Cloud Agent Server",
+            authType = PluginAuthType.API_KEY,
+            loginUrl = "https://app.all-hands.dev",
+            apiBaseUrl = "https://app.all-hands.dev/api",
+            keyPortalUrl = "https://app.all-hands.dev/settings/api-keys",
+            cookieDomain = "https://app.all-hands.dev",
+            tools = listOf(
+                PluginToolDef("openhands_list_conversations", "List recent OpenHands Cloud coding tasks & statuses", false, "{\"limit\":10}"),
+                PluginToolDef("openhands_get_status", "Fetch status & output summary of an OpenHands coding task", false, "{\"conversation_id\":\"...\"}"),
+                PluginToolDef("openhands_start_task", "Dispatch a cloud software engineering task to OpenHands (requires Human Yes)", true, "{\"initial_user_msg\":\"...\",\"selected_repository\":\"owner/repo\"}"),
+            ),
+        ),
     )
 
     fun byId(id: String): PluginDefinition? = ALL.firstOrNull { it.id.equals(id, ignoreCase = true) }

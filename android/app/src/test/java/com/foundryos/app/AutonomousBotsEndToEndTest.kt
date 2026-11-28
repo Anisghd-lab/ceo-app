@@ -1188,4 +1188,42 @@ class AutonomousBotsEndToEndTest {
         assertEquals(1, links.size)
         assertTrue(links[0].item.endsWith("seo_matrix.csv"))
     }
+
+    @Test
+    fun multiProducerMission_chainsAllProducersWithoutPausingBetweenBots() = runTest {
+        val cid = "cmp_full_auto_chain"
+        db.insertCompany(
+            com.foundryos.app.data.CompanyItem(
+                id = cid,
+                name = "AutoChain Studio",
+                description = "Fully autonomous multi-producer digital studio",
+                missionStatement = "Chain Research -> SheetCraft -> FormatForge -> QA without pauses",
+                status = "ACTIVE",
+                botsCount = 4,
+            )
+        )
+        db.insertBot(com.foundryos.app.data.BotItem(id = "b_ceo_ac", companyId = cid, name = "CEO", role = "CEO", tagline = "CEO", systemPrompt = "Lead", isCeo = true))
+        db.insertBot(com.foundryos.app.data.BotItem(id = "b_sheet_ac", companyId = cid, name = "SheetCraft", role = "Spreadsheet Engineer", tagline = "Builds XLSX", systemPrompt = "Build XLSX", allowedTools = listOf("create_xlsx")))
+        db.insertBot(com.foundryos.app.data.BotItem(id = "b_forge_ac", companyId = cid, name = "FormatForge", role = "Book Author", tagline = "Builds PDF", systemPrompt = "Build PDF", allowedTools = listOf("create_pdf")))
+        db.insertBot(com.foundryos.app.data.BotItem(id = "b_qa_ac", companyId = cid, name = "VeritasQA", role = "QA", tagline = "Audits", systemPrompt = "Audit", isQa = true))
+
+        aiServer.enqueue(openAiWrap("""{"action":"run_mission","title":"Finance Kit","goal":"Build XLSX + PDF autonomously","ceo_reply":"Pipeline 100% autonome lancé."}"""))
+        // Producer 1: SheetCraft builds .xlsx
+        aiServer.enqueue(openAiWrap("""{"action":"tool","tool":"create_xlsx","args":{"filename":"budget.xlsx","sheets":[{"name":"Budget","headers":["Item","Amount"],"rows":[["Rent","1200"],["Total","=SUM(B2:B2)"]]}]}}"""))
+        aiServer.enqueue(openAiWrap("""{"action":"final","summary":"budget.xlsx ready"}"""))
+        // Producer 2: FormatForge chains IMMEDIATELY after SheetCraft without any user message!
+        aiServer.enqueue(openAiWrap("""{"action":"tool","tool":"create_pdf","args":{"filename":"guide.pdf","title":"Finance Guide","chapters":[{"heading":"Chapter 1","body":"Complete actionable finance guide."}]}}"""))
+        aiServer.enqueue(openAiWrap("""{"action":"final","summary":"guide.pdf ready"}"""))
+        // QA audits after BOTH producers finished
+        aiServer.enqueue(openAiWrap("""{"passed":true,"score":96,"report":"Both XLSX and PDF verified."}"""))
+
+        engine.handleFounderMessage(cid, "Lance le kit finance complet")
+
+        val timeline = db.listMessages(cid).map { it.content }
+        assertTrue("SheetCraft must report | $timeline", timeline.any { it.contains("[SheetCraft → CEO]") })
+        assertTrue("FormatForge must chain automatically right after SheetCraft | $timeline", timeline.any { it.contains("[FormatForge → CEO]") })
+        assertTrue("VeritasQA must audit after both producers", timeline.any { it.contains("[VeritasQA → CEO]") && it.contains("96/100") })
+        assertTrue(sandbox.resolveFile(cid, "output/budget.xlsx").exists())
+        assertTrue(sandbox.resolveFile(cid, "output/guide.pdf").exists())
+    }
 }

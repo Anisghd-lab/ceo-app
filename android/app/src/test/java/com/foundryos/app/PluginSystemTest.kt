@@ -49,16 +49,17 @@ class PluginSystemTest {
     }
 
     @Test
-    fun registry_containsFourteenPluginsAndBuiltInPluginsAreConnected() {
-        assertEquals(14, PluginRegistry.ALL.size)
+    fun registry_containsFifteenPluginsAndBuiltInPluginsAreConnected() {
+        assertEquals(15, PluginRegistry.ALL.size)
         val ids = PluginRegistry.ALL.map { it.id }.toSet()
-        assertEquals(14, ids.size)
+        assertEquals(15, ids.size)
         assertTrue("browser" in ids)
         assertTrue("product_design" in ids)
         assertTrue("github" in ids)
         assertTrue("notion" in ids)
         assertTrue("instagram" in ids)
         assertTrue("tiktok" in ids)
+        assertTrue("openhands" in ids)
 
         val summary = executor.activeToolsSummaryForPrompt()
         assertTrue(summary.contains("browser_search"))
@@ -223,6 +224,77 @@ class PluginSystemTest {
         assertTrue(out.getBoolean("authenticated_cookies_used"))
         assertTrue(out.getString("text").contains("My Projects"))
         assertTrue("Expected WebView recovery visit to $base/projects and origin $base", visited.size >= 2)
+    }
+
+    @Test
+    fun openHandsCloud_gatesTaskStartBehindApprovalAndCallsApiWhenApproved() = runTest {
+        auth.saveToken("openhands", "oh_pat_live_test", accountLabel = "OpenHands Cloud")
+        executor.apiBaseOverrides["openhands"] = server.url("").toString().trimEnd('/')
+
+        // 1) Starting a cloud coding task requires Human Approval first
+        val staged = executor.execute(
+            companyId = "comp_oh",
+            toolName = "openhands_start_task",
+            args = JSONObject()
+                .put("initial_user_msg", "Fix pagination bug and add unit tests")
+                .put("selected_repository", "Anisghd-lab/ceo-app"),
+            allowWriteExecution = false,
+        )
+        assertTrue(staged.ok)
+        assertTrue("openhands_start_task must require approval before dispatching cloud compute", staged.requiresApproval)
+        assertEquals(0, server.requestCount)
+
+        // 2) Approved execution hits POST /conversations with Bearer auth and JSON payload
+        server.enqueue(
+            MockResponse().setResponseCode(200).setBody("""{"conversation_id":"conv_oh_42","status":"RUNNING"}""")
+        )
+        val started = executor.execute(
+            companyId = "comp_oh",
+            toolName = "openhands_start_task",
+            args = JSONObject()
+                .put("initial_user_msg", "Fix pagination bug and add unit tests")
+                .put("selected_repository", "Anisghd-lab/ceo-app"),
+            allowWriteExecution = true,
+        )
+        assertTrue("Approved OpenHands task must succeed: ${started.output}", started.ok)
+        assertFalse(started.requiresApproval)
+        assertTrue(started.output.contains("conv_oh_42"))
+        val postReq = server.takeRequest()
+        assertEquals("POST", postReq.method)
+        assertEquals("/conversations", postReq.path)
+        assertEquals("Bearer oh_pat_live_test", postReq.getHeader("Authorization"))
+        val sentJson = JSONObject(postReq.body.readUtf8())
+        assertEquals("Fix pagination bug and add unit tests", sentJson.getString("initial_user_msg"))
+        assertEquals("Anisghd-lab/ceo-app", sentJson.getString("selected_repository"))
+
+        // 3) Read status works directly without approval gate
+        server.enqueue(
+            MockResponse().setResponseCode(200).setBody("""{"conversation_id":"conv_oh_42","status":"FINISHED","pr_url":"https://github.com/Anisghd-lab/ceo-app/pull/7"}""")
+        )
+        val statusRes = executor.execute(
+            companyId = "comp_oh",
+            toolName = "openhands_get_status",
+            args = JSONObject().put("conversation_id", "conv_oh_42"),
+        )
+        assertTrue(statusRes.ok)
+        assertFalse(statusRes.requiresApproval)
+        assertTrue(statusRes.output.contains("FINISHED"))
+        val getReq = server.takeRequest()
+        assertEquals("GET", getReq.method)
+        assertEquals("/conversations/conv_oh_42", getReq.path)
+        assertEquals("Bearer oh_pat_live_test", getReq.getHeader("Authorization"))
+
+        // 4) List conversations works directly
+        server.enqueue(MockResponse().setResponseCode(200).setBody("""{"results":[{"conversation_id":"conv_oh_42"}]}"""))
+        val listRes = executor.execute(
+            companyId = "comp_oh",
+            toolName = "openhands_list_conversations",
+            args = JSONObject().put("limit", 5),
+        )
+        assertTrue(listRes.ok)
+        val listReq = server.takeRequest()
+        assertEquals("GET", listReq.method)
+        assertEquals("/conversations?limit=5", listReq.path)
     }
 
     @Test

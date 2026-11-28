@@ -160,6 +160,9 @@ class PluginToolExecutor(
                 "instagram_publish_post" -> execInstagramPublish(args)
                 "tiktok_list_videos" -> execTikTokVideos(args)
                 "tiktok_publish_video" -> execTikTokPublish(args)
+                "openhands_list_conversations" -> execOpenHandsList(args)
+                "openhands_get_status" -> execOpenHandsStatus(args)
+                "openhands_start_task" -> execOpenHandsStartTask(args)
                 else -> PluginToolResult(false, "Unknown plugin tool: $toolName")
             }
         } catch (e: Exception) {
@@ -844,6 +847,77 @@ class PluginToolExecutor(
             .build()
         return http.newCall(req).execute().use { resp ->
             PluginToolResult(resp.isSuccessful, resp.body?.string().orEmpty().take(2000))
+        }
+    }
+
+    private fun execOpenHandsList(args: JSONObject): PluginToolResult {
+        val tok = requireToken("openhands", "OpenHands Cloud")
+            ?: return PluginToolResult(false, "OpenHands Cloud not connected. Open Settings -> Plugins -> OpenHands Cloud to add your API key from app.all-hands.dev/settings/api-keys.")
+        val limit = args.optInt("limit", 10).coerceIn(1, 50)
+        val base = baseUrl("openhands", "https://app.all-hands.dev/api")
+        val req = Request.Builder()
+            .url("$base/conversations?limit=$limit")
+            .header("Authorization", "Bearer $tok")
+            .header("Accept", "application/json")
+            .get()
+            .build()
+        return http.newCall(req).execute().use { resp ->
+            val raw = resp.body?.string().orEmpty()
+            if (!resp.isSuccessful) {
+                PluginToolResult(false, "OpenHands list HTTP ${resp.code}: ${raw.take(400)}")
+            } else {
+                PluginToolResult(true, raw.take(6000))
+            }
+        }
+    }
+
+    private fun execOpenHandsStatus(args: JSONObject): PluginToolResult {
+        val tok = requireToken("openhands", "OpenHands Cloud")
+            ?: return PluginToolResult(false, "OpenHands Cloud API key missing.")
+        val convId = args.optString("conversation_id").ifBlank { args.optString("id") }.trim()
+        if (convId.isBlank()) return PluginToolResult(false, "Missing conversation_id for openhands_get_status")
+        val base = baseUrl("openhands", "https://app.all-hands.dev/api")
+        val req = Request.Builder()
+            .url("$base/conversations/${enc(convId)}")
+            .header("Authorization", "Bearer $tok")
+            .header("Accept", "application/json")
+            .get()
+            .build()
+        return http.newCall(req).execute().use { resp ->
+            val raw = resp.body?.string().orEmpty()
+            if (!resp.isSuccessful) {
+                PluginToolResult(false, "OpenHands status HTTP ${resp.code}: ${raw.take(400)}")
+            } else {
+                PluginToolResult(true, raw.take(6000))
+            }
+        }
+    }
+
+    private fun execOpenHandsStartTask(args: JSONObject): PluginToolResult {
+        val tok = requireToken("openhands", "OpenHands Cloud")
+            ?: return PluginToolResult(false, "OpenHands Cloud API key missing. Add it in Settings -> Plugins -> OpenHands Cloud.")
+        val msg = args.optString("initial_user_msg")
+            .ifBlank { args.optString("prompt") }
+            .ifBlank { args.optString("task") }
+            .trim()
+        if (msg.isBlank()) return PluginToolResult(false, "Missing initial_user_msg for openhands_start_task")
+        val repo = args.optString("selected_repository").ifBlank { args.optString("repository") }.trim()
+        val payload = JSONObject().put("initial_user_msg", msg)
+        if (repo.isNotBlank()) payload.put("selected_repository", repo)
+        val base = baseUrl("openhands", "https://app.all-hands.dev/api")
+        val req = Request.Builder()
+            .url("$base/conversations")
+            .header("Authorization", "Bearer $tok")
+            .header("Accept", "application/json")
+            .post(payload.toString().toRequestBody(jsonMedia))
+            .build()
+        return http.newCall(req).execute().use { resp ->
+            val raw = resp.body?.string().orEmpty()
+            if (!resp.isSuccessful) {
+                PluginToolResult(false, "OpenHands start task HTTP ${resp.code}: ${raw.take(400)}")
+            } else {
+                PluginToolResult(true, raw.take(4000))
+            }
         }
     }
 

@@ -9,8 +9,8 @@
 
 ## 2. État d'Avancement Réel
 - [x] **Antigravity CLI Native Engine (`android/app/.../agy/`)** : binaire ARM64 vérifié SHA-512, superviseur `agy --hub`, parsing exact des événements `--output-format stream-json`, multi-comptes Google sans révocation, quotas `5h`/`Weekly` & par modèle.
-- [x] **Store de Plugins (`14 plugins` dont Instagram & TikTok, `android/app/.../plugins/`)** :
-  - `PluginRegistry.kt` : 14 plugins pré-configurés (`browser`, `notion`, `slack`, `github`, `gmail`, `gdrive`, `figma`, `canva`, `kittl`, `product_design`, `tinyfish`, `scite`, `instagram`, `tiktok`).
+- [x] **Store de Plugins (`15 plugins` dont OpenHands Cloud, Instagram & TikTok, `android/app/.../plugins/`)** :
+  - `PluginRegistry.kt` : 15 plugins pré-configurés (`browser`, `notion`, `slack`, `github`, `gmail`, `gdrive`, `figma`, `canva`, `kittl`, `product_design`, `tinyfish`, `scite`, `instagram`, `tiktok`, `openhands`).
   - `PluginAuthManager.kt` : OAuth 2.0 PKCE + loopback local `127.0.0.1`, MCP Dynamic Client Registration + PKCE, détection automatique des sessions cookies dans le navigateur interne `CEO`, tokens/clés optionnels.
   - `PluginToolExecutor.kt` : exécution directe des outils recherche/lecture/prototypage/réseaux sociaux, et verrou d'approbation humaine (`Ship / Not yet`) pour toute action d'écriture externe (Slack, Gmail, GitHub Issue, Notion Page, Drive Upload, Instagram reply/publish, TikTok publish).
 - [x] **Pipeline Multi-Agents à 5 Étapes (`3 à 8 spécialistes`) & Graphiques Vectoriels (`AutonomousEngine.kt`)** :
@@ -29,6 +29,10 @@
 - [x] **Backend Python (`backend/`)** : 5/5 tests `pytest` verts.
 - [x] **FreeLLMAPI (`freellmapi`) + Pool Modèles Gratuits (`v0.7.0`)** :
   - Fournisseur natif `freellmapi` avec URL de passerelle configurable (défaut `http://127.0.0.1:3001`), jeton Bearer optionnel en local, filtre automatique sur `available == true`, badge `FREE`, épingle `auto` / `fusion` et activation automatique du routeur gratuit.
+- [x] **Autonomie Ultime Multi-Bots, Choix CEO en Notifications & OpenHands Cloud Plugin #15 (`v0.11.0`)** :
+  - `AutonomousEngine.kt` + `MainApp.kt` : enchaînement 100 % autonome et ininterrompu de TOUS les spécialistes (`Research → ALL Producers (ex. SheetCraft + FormatForge) → Visuals → QA → Launch → Memory → Final Ship`), directive *Ultimate Autonomy* sur le CEO, et ouverture de `BotInspectorDialog` sans détourner le chat actif du CEO.
+  - `ApprovalNotifier.kt` : notification haute priorité `showChoiceNotification` pour chaque question interactive du CEO avec boutons directs en 1 tap + réponse inline `RemoteInput` qui déclenche immédiatement le `AgentExecutionService` en arrière-plan.
+  - `PluginRegistry.kt` + `PluginToolExecutor.kt` : Plugin #15 **OpenHands Cloud** (`https://app.all-hands.dev/api`) exposant `openhands_list_conversations`, `openhands_get_status` et `openhands_start_task` (verrouillé derrière approbation humaine) pour déléguer des tâches de génie logiciel Docker/GitHub PR dans le cloud quand une clé API est configurée, sans jamais alourdir le fonctionnement 100 % on-device.
 - [x] **Rendu Markdown Natif & Liens Fichiers Cliquables dans le Chat (`v0.10.2`)** :
   - `MarkdownChatText.kt` + `MainApp.kt` + `FoundryRepository.kt` : affichage natif Jetpack Compose de tous les éléments Markdown (titres `H1–H4`, **gras**, *italique*, ~~barré~~, code inline/blocs, listes à puces/numérotées/cases à cocher, citations, tableaux, séparateurs, et liens `[nom](file:///...)` / `https://...` cliquables sans jamais exposer `#`, `**`, `*`, `` ` `` ou `file:///`) + compactage `Suggested APIs` dans `CompanyOrgCard`.
 - [x] **Audit Live ADB & Fiabilisation Production (`v0.10.1`)** :

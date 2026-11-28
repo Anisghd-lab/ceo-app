@@ -1156,4 +1156,36 @@ class AutonomousBotsEndToEndTest {
         val cleaned = llm.sanitizeAssistantDisplayText("<think>internal</think>Réponse nette pour le Fondateur.<tool_call><function=x></function></tool_call>")
         assertEquals("Réponse nette pour le Fondateur.", cleaned)
     }
+
+    @Test
+    fun markdownChatParser_rendersHeadingsBoldItalicCodeAndClickableLinksWithoutRawSymbols() {
+        val sample = """
+            ### 1. Synthèse du Marché
+            - **Pain Point identifié :** *The Maintenance Trap* avec `notion second brain`.
+            - Fichier prêt : [seo_matrix.csv](file:///data/user/0/com.foundryos.app/files/sandboxes/cmp_1/output/seo_matrix.csv)
+            > Citation clé en italique
+        """.trimIndent()
+
+        val blocks = com.foundryos.app.ui.components.MarkdownParser.parseBlocks(sample)
+        assertEquals(4, blocks.size)
+        val h = blocks[0] as com.foundryos.app.ui.components.MdBlock.Heading
+        assertEquals(3, h.level)
+        assertEquals("1. Synthèse du Marché", h.text)
+
+        val b1 = blocks[1] as com.foundryos.app.ui.components.MdBlock.BulletItem
+        val styled1 = com.foundryos.app.ui.components.MarkdownParser.parseInline(b1.text)
+        assertFalse("Raw ** must not appear in rendered text", styled1.text.contains("**"))
+        assertFalse("Raw * must not appear in rendered text", styled1.text.contains("*"))
+        assertFalse("Raw backticks must not appear in rendered text", styled1.text.contains("`"))
+        assertTrue("Bold span must be applied", styled1.spanStyles.any { it.item.fontWeight == androidx.compose.ui.text.font.FontWeight.Bold })
+        assertTrue("Italic span must be applied", styled1.spanStyles.any { it.item.fontStyle == androidx.compose.ui.text.font.FontStyle.Italic })
+
+        val b2 = blocks[2] as com.foundryos.app.ui.components.MdBlock.BulletItem
+        val styled2 = com.foundryos.app.ui.components.MarkdownParser.parseInline(b2.text)
+        assertFalse("Raw file:/// path must be hidden behind clean label", styled2.text.contains("file:///"))
+        assertTrue("Clean filename label must be visible", styled2.text.contains("seo_matrix.csv"))
+        val links = styled2.getStringAnnotations("LINK", 0, styled2.length)
+        assertEquals(1, links.size)
+        assertTrue(links[0].item.endsWith("seo_matrix.csv"))
+    }
 }

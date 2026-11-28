@@ -130,6 +130,7 @@ import com.foundryos.app.ui.components.BoardMeetingCard
 import com.foundryos.app.ui.components.BotMascot
 import com.foundryos.app.ui.components.CompanyOrgCard
 import com.foundryos.app.ui.components.InteractiveChoicesCard
+import com.foundryos.app.ui.components.MarkdownChatText
 import com.foundryos.app.ui.components.ReleaseApprovalCard
 import com.foundryos.app.ui.theme.FoundryColors
 import kotlinx.coroutines.Job
@@ -924,6 +925,21 @@ fun FoundryMainScreen(repo: FoundryRepository) {
                             },
                             onRegenerate = {
                                 launchRegenerate(activeCompany.id, msg.id)
+                            },
+                            onLinkClick = { link ->
+                                when {
+                                    link.startsWith("http://", true) || link.startsWith("https://", true) -> {
+                                        browserUrl = link
+                                        browserIsOAuth = false
+                                        showBrowserDialog = true
+                                    }
+                                    link.startsWith("file://", true) || link.startsWith("/") -> {
+                                        val ok = repo.openSandboxLink(link)
+                                        if (!ok) {
+                                            Toast.makeText(context, "Fichier introuvable dans la sandbox", Toast.LENGTH_SHORT).show()
+                                        }
+                                    }
+                                }
                             },
                         )
                     }
@@ -1851,6 +1867,7 @@ private fun ChatMessageRow(
     onCancelEdit: () -> Unit = {},
     onSaveEdit: () -> Unit = {},
     onRegenerate: () -> Unit = {},
+    onLinkClick: (String) -> Unit = {},
 ) {
     when {
         msg.senderType == "human" -> {
@@ -1875,10 +1892,12 @@ private fun ChatMessageRow(
                             .background(FoundryColors.InkPrimary)
                             .padding(horizontal = 15.dp, vertical = 12.dp),
                     ) {
-                        Text(
-                            text = msg.content,
-                            style = MaterialTheme.typography.bodyLarge,
-                            color = Color.White,
+                        MarkdownChatText(
+                            markdown = msg.content,
+                            textColor = Color.White,
+                            linkColor = Color(0xFF93C5FD),
+                            codeBg = Color(0xFF27272A),
+                            onLinkClick = onLinkClick,
                         )
                     }
                     Spacer(Modifier.height(4.dp))
@@ -1942,7 +1961,7 @@ private fun ChatMessageRow(
         msg.cardType == "approval" && msg.approval != null -> {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 if (msg.content.isNotBlank()) {
-                    BotBubble(text = msg.content)
+                    BotBubble(text = msg.content, onLinkClick = onLinkClick)
                 }
                 ReleaseApprovalCard(
                     approval = msg.approval,
@@ -1954,7 +1973,7 @@ private fun ChatMessageRow(
         msg.cardType == "board_meeting" && msg.boardMeeting != null -> {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 if (msg.content.isNotBlank()) {
-                    BotBubble(text = msg.content)
+                    BotBubble(text = msg.content, onLinkClick = onLinkClick)
                 }
                 BoardMeetingCard(data = msg.boardMeeting)
             }
@@ -1966,7 +1985,7 @@ private fun ChatMessageRow(
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 if (msg.content.isNotBlank()) {
-                    BotBubble(text = msg.content)
+                    BotBubble(text = msg.content, onLinkClick = onLinkClick)
                 }
                 InteractiveChoicesCard(
                     choices = msg.choices,
@@ -2002,7 +2021,7 @@ private fun ChatMessageRow(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalAlignment = Alignment.Start,
             ) {
-                BotBubble(text = msg.content)
+                BotBubble(text = msg.content, onLinkClick = onLinkClick)
                 if (msg.content.isNotBlank()) {
                     Spacer(Modifier.height(4.dp))
                     Row(
@@ -2274,19 +2293,24 @@ private fun SwipeableCompanyRow(
 }
 
 @Composable
-private fun BotBubble(text: String) {
+private fun BotBubble(
+    text: String,
+    onLinkClick: (String) -> Unit = {},
+) {
     Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Start) {
         Box(
             modifier = Modifier
-                .fillMaxWidth(0.86f)
+                .fillMaxWidth(0.90f)
                 .clip(RoundedCornerShape(18.dp))
                 .background(FoundryColors.SoftSurface)
-                .padding(horizontal = 14.dp, vertical = 11.dp),
+                .padding(horizontal = 14.dp, vertical = 12.dp),
         ) {
-            Text(
-                text = text,
-                style = MaterialTheme.typography.bodyLarge,
-                color = FoundryColors.InkPrimary,
+            MarkdownChatText(
+                markdown = text,
+                textColor = FoundryColors.InkPrimary,
+                linkColor = FoundryColors.BlueInk,
+                codeBg = Color(0xFFE5E7EB),
+                onLinkClick = onLinkClick,
             )
         }
     }

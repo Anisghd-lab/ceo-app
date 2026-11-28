@@ -7,9 +7,9 @@ on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: 'Release tag (e.g. v0.10.1)'
+        description: 'Release tag (e.g. v0.10.2)'
         required: false
-        default: 'v0.10.1'
+        default: 'v0.10.2'
 
 permissions:
   contents: write
@@ -87,7 +87,7 @@ jobs:
             if [[ "${{ github.ref }}" == refs/tags/* ]]; then
               TAG="${{ github.ref_name }}"
             else
-              TAG="v0.10.1"
+              TAG="v0.10.2"
             fi
           fi
 
@@ -98,7 +98,7 @@ jobs:
           UNIQUE_APK="/tmp/${ASSET_NAME}"
           cp "$APK_PATH" "$UNIQUE_APK"
 
-          NOTES="$(printf '### CEO — 100%% On-Device Autonomous Company OS (%s)\n\n- **Auto-récupération modèle Antigravity CLI (`agy`)** : si le modèle sauvegardé est obsolète/renommé (ex. `gemini-4-neon-high`) ou épuisé en quota, l'\''app détecte automatiquement les modèles live (`agy models`), bascule sur un modèle valide et le mémorise sans jamais tomber silencieusement sur un mini-modèle de secours\n- **Parseur natif des appels d'\''outils XML Qwen3/Hermes (`<tool_call><function=...>`)** : exécute réellement les outils au lieu d'\''afficher du XML brut dans le chat et filtre `<think>` / `<tool_call>`\n- **Validation stricte des propositions d'\''entreprise & QA Gate honnête** : rejette les échos de schéma vide, affiche le statut en direct + spinner haute visibilité dans *Found a new company*, et signale explicitement les livrables `< 60/100` en QA\n- **Usine Multi-Formats de Produits Numériques Vendables** : `.xlsx` (formules), `.pptx` (16:9), `.docx`, `.png` HD, packs Notion, `.html` interactifs, `.csv`, `.svg`, `.pdf` illustrés et bundles `.zip`\n- **Taille APK** : `%s`\n- **SHA-256** : `%s`\n- **Compilé sur** : GitHub Actions (`ubuntu-latest`)\n' "$TAG" "$SIZE" "$SHA256")"
+          NOTES="$(printf '### CEO — 100%% On-Device Autonomous Company OS (%s)\n\n- **Rendu Markdown natif riche dans le chat (`MarkdownChatText`)** : fini les `###`, `**`, `*`, backticks et chemins `file:///` bruts — affichage natif propre des **titres**, **gras**, *italique*, `badges de code`, listes à puces/numérotées, cases à cocher, citations, tableaux et **liens fichiers cliquables** ouvrant directement les livrables de la sandbox\n- **Carte `CompanyOrgCard` compactée** : les APIs suggérées n'\''étirent plus excessivement la boîte de création\n- **Auto-migration `agy` + Parseur XML Qwen3 + Usine Multi-Formats (`.xlsx`, `.pptx`, `.docx`, `.png`, Notion, `.html`, `.csv`, `.pdf` illustrés, `.zip`)**\n- **Taille APK** : `%s`\n- **SHA-256** : `%s`\n- **Compilé sur** : GitHub Actions (`ubuntu-latest`)\n' "$TAG" "$SIZE" "$SHA256")"
 
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" "$UNIQUE_APK" --clobber

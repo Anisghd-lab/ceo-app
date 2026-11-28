@@ -29,6 +29,8 @@
 - [x] **Backend Python (`backend/`)** : 5/5 tests `pytest` verts.
 - [x] **FreeLLMAPI (`freellmapi`) + Pool Modèles Gratuits (`v0.7.0`)** :
   - Fournisseur natif `freellmapi` avec URL de passerelle configurable (défaut `http://127.0.0.1:3001`), jeton Bearer optionnel en local, filtre automatique sur `available == true`, badge `FREE`, épingle `auto` / `fusion` et activation automatique du routeur gratuit.
+- [x] **Rendu Markdown Natif & Liens Fichiers Cliquables dans le Chat (`v0.10.2`)** :
+  - `MarkdownChatText.kt` + `MainApp.kt` + `FoundryRepository.kt` : affichage natif Jetpack Compose de tous les éléments Markdown (titres `H1–H4`, **gras**, *italique*, ~~barré~~, code inline/blocs, listes à puces/numérotées/cases à cocher, citations, tableaux, séparateurs, et liens `[nom](file:///...)` / `https://...` cliquables sans jamais exposer `#`, `**`, `*`, `` ` `` ou `file:///`) + compactage `Suggested APIs` dans `CompanyOrgCard`.
 - [x] **Audit Live ADB & Fiabilisation Production (`v0.10.1`)** :
   - `AgyRuntimeManager.kt` : auto-migration automatique des modèles `agy` obsolètes/renommés (ex. `gemini-4-neon-high` → modèle live valide) dans `fetchModelsAndQuotas` et `runPrompt` avec retry transparent.
   - `OnDeviceLLMClient.kt` + `AutonomousEngine.kt` : parseur complet des appels d'outils XML Qwen3/Hermes (`<tool_call><function=...>`) convertis en exécution réelle + nettoyage `<think>`/`<tool_call>` avant affichage, rejet des échos de schéma vide dans `proposeCompany`, et avertissement explicite sur la carte d'approbation si le score QA `< 60/100`.

@@ -141,10 +141,15 @@ fun CompanyOrgCard(
             Spacer(Modifier.height(10.dp))
             HorizontalDivider(color = FoundryColors.Border, thickness = 0.8.dp)
             Spacer(Modifier.height(8.dp))
+            val compactConnectors = connectors.map { raw ->
+                raw.substringBefore("(").substringBefore("—").trim().take(34)
+            }.filter { it.isNotBlank() }
             Text(
-                text = "Suggested APIs: ${connectors.joinToString(" · ")}",
+                text = "Suggested APIs: ${compactConnectors.joinToString(" · ")}",
                 style = MaterialTheme.typography.labelSmall,
                 color = FoundryColors.InkSecondary,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
             )
         }
     }

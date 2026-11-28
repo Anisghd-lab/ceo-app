@@ -218,9 +218,44 @@ class FoundryRepository(private val context: Context) {
 
     fun openOrShareArtifact(artifact: ArtifactItem): Boolean {
         val file = resolveArtifactFile(artifact) ?: return false
+        return openOrShareFile(file, artifact.mimeType)
+    }
+
+    fun openSandboxLink(rawLink: String): Boolean {
+        val cleanPath = rawLink
+            .removePrefix("file://")
+            .substringBefore('#')
+            .substringBefore('?')
+            .trim()
+        if (cleanPath.isBlank()) return false
+        val file = File(cleanPath)
+        val sandboxesRoot = sandbox.sandboxesBaseDir().canonicalPath
+        val resolved = runCatching { file.canonicalFile }.getOrNull() ?: return false
+        if (!resolved.path.startsWith(sandboxesRoot) || !resolved.exists() || !resolved.isFile) {
+            return false
+        }
+        val ext = resolved.extension.lowercase()
+        val mime = when (ext) {
+            "pdf" -> "application/pdf"
+            "xlsx" -> "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            "pptx" -> "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+            "docx" -> "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+            "png" -> "image/png"
+            "jpg", "jpeg" -> "image/jpeg"
+            "svg" -> "image/svg+xml"
+            "csv" -> "text/csv"
+            "html" -> "text/html"
+            "md" -> "text/markdown"
+            "zip" -> "application/zip"
+            else -> "text/plain"
+        }
+        return openOrShareFile(resolved, mime)
+    }
+
+    private fun openOrShareFile(file: File, mimeType: String): Boolean {
         val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
         val viewIntent = Intent(Intent.ACTION_VIEW).apply {
-            setDataAndType(uri, artifact.mimeType)
+            setDataAndType(uri, mimeType)
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
         }
         return try {
@@ -228,11 +263,11 @@ class FoundryRepository(private val context: Context) {
             true
         } catch (_: Exception) {
             val shareIntent = Intent(Intent.ACTION_SEND).apply {
-                type = artifact.mimeType
+                type = mimeType
                 putExtra(Intent.EXTRA_STREAM, uri)
                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
             }
-            val chooser = Intent.createChooser(shareIntent, "Open / Share ${artifact.filename}").apply {
+            val chooser = Intent.createChooser(shareIntent, "Open / Share ${file.name}").apply {
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             }
             context.startActivity(chooser)

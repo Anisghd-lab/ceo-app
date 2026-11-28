@@ -94,8 +94,9 @@ object MarkdownParser {
             }
 
             // 3. Heading # .. ######
-            headingRegex.matchEntire(trimmed)?.let { m ->
-                blocks.add(MdBlock.Heading(level = m.groupValues[1].length, text = m.groupValues[2].trim()))
+            val hMatch = headingRegex.matchEntire(trimmed)
+            if (hMatch != null) {
+                blocks.add(MdBlock.Heading(level = hMatch.groupValues[1].length, text = hMatch.groupValues[2].trim()))
                 i++
                 continue
             }
@@ -127,23 +128,26 @@ object MarkdownParser {
             }
 
             // 6. Checkbox - [ ] / - [x]
-            checkboxRegex.matchEntire(line)?.let { m ->
-                val done = m.groupValues[1].equals("x", ignoreCase = true)
-                blocks.add(MdBlock.BulletItem(text = m.groupValues[2].trim(), marker = if (done) "☑" else "☐"))
+            val cMatch = checkboxRegex.matchEntire(line)
+            if (cMatch != null) {
+                val done = cMatch.groupValues[1].equals("x", ignoreCase = true)
+                blocks.add(MdBlock.BulletItem(text = cMatch.groupValues[2].trim(), marker = if (done) "☑" else "☐"))
                 i++
                 continue
             }
 
             // 7. Bullet list - / * / •
-            bulletRegex.matchEntire(line)?.let { m ->
-                blocks.add(MdBlock.BulletItem(text = m.groupValues[1].trim(), marker = "•"))
+            val bMatch = bulletRegex.matchEntire(line)
+            if (bMatch != null) {
+                blocks.add(MdBlock.BulletItem(text = bMatch.groupValues[1].trim(), marker = "•"))
                 i++
                 continue
             }
 
             // 8. Numbered list 1. / 1)
-            numberedRegex.matchEntire(line)?.let { m ->
-                blocks.add(MdBlock.BulletItem(text = m.groupValues[2].trim(), marker = m.groupValues[1]))
+            val nMatch = numberedRegex.matchEntire(line)
+            if (nMatch != null) {
+                blocks.add(MdBlock.BulletItem(text = nMatch.groupValues[2].trim(), marker = nMatch.groupValues[1]))
                 i++
                 continue
             }
